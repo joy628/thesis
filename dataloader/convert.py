@@ -7,7 +7,7 @@ from utils import write_json, write_pkl, load_json
 def convert_timeseries_to_mmap(data_dir, save_dir, n_rows=100000):
     """Convert timeseries CSV files to memory-mapped files."""
     save_path = Path(save_dir) / 'ts.dat'
-    shape = (n_rows, 24, 34)
+    shape = (n_rows, 24, 115)
     mmap_file = np.memmap(save_path, dtype=np.float32, mode='w+', shape=shape)
     ids, total_rows = [], 0
     info = {'name': 'ts', 'shape': shape}
@@ -15,7 +15,7 @@ def convert_timeseries_to_mmap(data_dir, save_dir, n_rows=100000):
     for split in ['train', 'val', 'test']:
         print(f'Processing {split} split...')
         csv_path = Path(data_dir) / split / 'timeseries.csv'
-        df = pd.read_csv(csv_path).values.reshape(-1, 24, 35)
+        df = pd.read_csv(csv_path).values.reshape(-1, 24,116)
         ids.append(df[:, 0, 0])
         mmap_file[total_rows:total_rows + len(df), :, :] = df[:, :, 1:]
         info[f'{split}_len'] = len(df)
@@ -31,11 +31,11 @@ def convert_timeseries_to_mmap(data_dir, save_dir, n_rows=100000):
     write_pkl(id2pos, Path(save_dir) / 'id2pos.pkl')
     write_pkl(pos2id, Path(save_dir) / 'pos2id.pkl')
     write_json(info, Path(save_dir) / 'ts_info.json')
-    print('Done.')
+    print(f"Timeseries conversion complete. Info: {info}")
 
 def convert_csv_to_mmap(data_dir, save_dir, csv_name, n_cols=None, n_rows=100000):
     """Convert flat CSV files to memory-mapped files."""
-    column_map = {'diagnoses': 520, 'diagnoses_1033': 1034, 'labels': 5, 'flat': 58}
+    column_map = {'diagnoses': 116,  'labels': 4, 'flat': 107}
     n_cols = (column_map[csv_name] - 1) if n_cols is None else n_cols
     shape = (n_rows, n_cols)
 
@@ -55,7 +55,7 @@ def convert_csv_to_mmap(data_dir, save_dir, csv_name, n_cols=None, n_rows=100000
     info['total'] = total_rows
     info['columns'] = list(pd.read_csv(csv_path).columns[1:])
     write_json(info, Path(save_dir) / f'{csv_name}_info.json')
-    print('Done.')
+    print(f"{csv_name} conversion complete. Info: {info}")
 
 
 def read_mm(data_dir, name):

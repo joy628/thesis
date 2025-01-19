@@ -2,6 +2,10 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 
+import os
+import sys
+
+sys.path.append(os.path.abspath("../"))
 from utils import write_json, write_pkl, load_json
 
 def convert_timeseries_to_mmap(data_dir, save_dir):

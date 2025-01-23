@@ -1,5 +1,6 @@
 {
     "eICU_path": "/home/mei/nas/docker/thesis/data/csv",
+    "hdf_dir": "/home/mei/nas/docker/thesis/data/hdf/",
     "log_path": "/home/mei/nas/docker/thesis/data/logs/",
     "data_dir": "/home/mei/nas/docker/thesis/data/",
     "graph_dir": "/home/mei/nas/docker/thesis/data/graphs/",

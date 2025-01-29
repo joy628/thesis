@@ -1,88 +1,64 @@
 """
 Dataloaders for lstm_only model
 """
+import os
 import numpy as np
 import torch
+import pandas as pd
 from torch.utils.data import Dataset, DataLoader
-from convert import read_mm
-from pathlib import Path
+from torch.nn.utils.rnn import pad_sequence 
 
-def slice_data(data, info, split):
-    """Slice data according to the instances belonging to each split."""
-    if split is None:
-        return data
-    split_indices = {
-        'train': slice(0, info['train_len']),
-        'val': slice(info['train_len'], info['train_len'] + info['val_len']),
-        'test': slice(info['train_len'] + info['val_len'], info['total'])
-    }
-    return data[split_indices[split]]
-
-def no_mask_cols(ts_info, seq):
-    """Remove temporal mask columns."""
-    neg_mask_cols = [i for i, e in enumerate(ts_info['columns']) if 'mask' not in e]
-    return seq[:, :, neg_mask_cols]
-
-def collect_ts_flat_labels(data_dir, ts_mask, task, add_diag, split=None, debug=0, split_flat_and_diag=False):
-    """Read temporal, flat data and task labels."""
-    def read_and_slice(name):
-        data, info = read_mm(data_dir, name)
-        return slice_data(data, info, split), info
-
-    flat, flat_info = read_and_slice('flat')
-    seq, ts_info = read_and_slice('ts')
-    if not ts_mask:
-        seq = no_mask_cols(ts_info, seq)
-
-    if add_diag:
-        diag, _ = read_and_slice('diagnoses')
-        flat = (flat, diag) if split_flat_and_diag else np.concatenate([flat, diag], axis=1)
-
-    labels, _ = read_and_slice('labels')
-    labels = labels[:, {'ihm': 1, 'los': 3, 'multi': [1, 3]}[task]]
-
-    if debug:
-        N = 1000
-        train_n, val_n = int(N * 0.5), int(N * 0.25)
-    else:
-        N, train_n, val_n = flat_info['total'], flat_info['train_len'], flat_info['val_len']
-
-    return seq[:N], flat[:N], labels[:N], flat_info, N, train_n, val_n
-
-def get_class_weights(train_labels):
-    """Return class weights to handle class imbalance problems."""
-    occurences = np.unique(train_labels, return_counts=True)[1]
-    class_weights = torch.Tensor(occurences.sum() / occurences).float()
-    return class_weights
-
-class LstmDataset(Dataset):
-    """Dataset class for temporal data."""
-    def __init__(self, config, split=None):
-        super().__init__()
-        task = config['task']
-        self.seq, self.flat, self.labels, self.ts_info, self.N, train_n, val_n = collect_ts_flat_labels(
-            config['data_dir'], config['ts_mask'], task, config['add_diag'], split, debug=0)
-
-        self.ts_dim, self.flat_dim = self.seq.shape[2], self.flat.shape[1]
-        self.split_n = {'train': train_n, 'val': val_n, 'test': self.N - train_n - val_n}.get(split, self.N)
-        self.ids = slice_data(np.arange(self.N), self.ts_info, split)
-        self.class_weights = get_class_weights(self.labels[:train_n]) if task == 'ihm' else None
+class LSTMTSDataset(Dataset):
+    """
+    PyTorch Dataset for loading time series, labels, and flat features from HDF5 files.
+    """
+    def __init__(self, data_dir):
+        """
+        Args:
+        - data_dir (str): Path to the dataset directory (e.g., 'train', 'val', 'test')
+        """
+        self.data_dir = data_dir
+        stays_path = os.path.join(data_dir, "stays.txt")
+        self.patients = pd.read_csv(stays_path, header=None)[0].tolist()   
+        
 
     def __len__(self):
-        return self.split_n
+        return len(self.patients)
 
-    def __getitem__(self, index):
-        return self.seq[index], self.flat[index], self.labels[index], self.ids[index]
+    def __getitem__(self,idx):
+        
+        patient_id = self.patients[idx]
+ 
+        # **load time series**
+        with pd.HDFStore(os.path.join(self.data_dir, "timeseries.h5")) as store:
+            timeseries = store.get("/table").loc[patient_id] 
+            ts_len = len(timeseries) 
+            timeseries = torch.tensor(timeseries.values, dtype=torch.float)
+
+        # ** flat features**
+        with pd.HDFStore(os.path.join(self.data_dir, "flat.h5")) as store:
+            flat = store.get("/table").loc[patient_id].values 
+            flat = torch.tensor(flat, dtype=torch.float)
+
+        # ** labels**
+        with pd.HDFStore(os.path.join(self.data_dir, "labels.h5")) as store:
+            label = store.get("/table").loc[patient_id, "unitdischargestatus"] 
+            label = torch.tensor(label, dtype=torch.long)
+
+        return patient_id,timeseries, ts_len,flat, label
+
 
 def collate_fn(batch):
-    """Collect samples in each batch."""
-    seq, flat, labels, ids = zip(*batch)
-    seq = torch.Tensor(np.stack(seq)).float()
-    flat = torch.Tensor(np.stack(flat)).float()
-    labels = torch.Tensor(np.stack(labels)).float() if labels[0].dtype == np.float32 else torch.Tensor(np.stack(labels)).long()
-    ids = torch.Tensor(np.stack(ids)).long()
-    return (seq, flat), labels, ids
+    """Dynamic padding for batch processing."""
+    ids,seqs,ts_lens, flats, labels = zip(*batch)
 
-def get_dataloader(config, split="train", batch_size=32, shuffle=True):
-    dataset = LstmDataset(config, split)
-    return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, collate_fn=collate_fn)
+    seq_lengths = torch.tensor(ts_lens, dtype=torch.long)   # lengths of each sequence in the batch
+
+    seqs_padded = pad_sequence(seqs, batch_first=True, padding_value=-9999)   # pad with -1
+
+    flats = torch.stack(flats).float()
+    labels = torch.tensor(labels).long()
+    ids = torch.tensor(ids).long()
+
+    return (seqs_padded, seq_lengths, flats), labels, ids
+

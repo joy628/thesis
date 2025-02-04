@@ -12,15 +12,17 @@ class LSTMTSDataset(Dataset):
     """
     PyTorch Dataset for loading time series, labels, and flat features from HDF5 files.
     """
-    def __init__(self, data_dir):
+    def __init__(self, data_dir, debug=False):
         """
         Args:
         - data_dir (str): Path to the dataset directory (e.g., 'train', 'val', 'test')
         """
+        
         self.data_dir = data_dir
         stays_path = os.path.join(data_dir, "stays.txt")
         self.patients = pd.read_csv(stays_path, header=None)[0].tolist()   
-        
+        if debug:
+            self.patients = self.patients[:10]
 
     def __len__(self):
         return len(self.patients)
@@ -42,7 +44,7 @@ class LSTMTSDataset(Dataset):
 
         # ** labels**
         with pd.HDFStore(os.path.join(self.data_dir, "labels.h5")) as store:
-            label = store.get("/table").loc[patient_id, "unitdischargestatus"] 
+            label = store.get("/table").loc[patient_id, "discharge_risk_category"] 
             label = torch.tensor(label, dtype=torch.long)
 
         return patient_id,timeseries, ts_len,flat, label
@@ -60,5 +62,5 @@ def collate_fn(batch):
     labels = torch.tensor(labels).long()
     ids = torch.tensor(ids).long()
 
-    return (seqs_padded, seq_lengths, flats), labels, ids
+    return (flats,seqs_padded, seq_lengths), labels, ids
 

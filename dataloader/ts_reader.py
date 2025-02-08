@@ -2,65 +2,66 @@
 Dataloaders for lstm_only model
 """
 import os
-import numpy as np
 import torch
-import pandas as pd
 from torch.utils.data import Dataset, DataLoader
-from torch.nn.utils.rnn import pad_sequence 
+from torch.nn.utils.rnn import pack_padded_sequence, pad_sequence
 
-class LSTMTSDataset(Dataset):
-    """
-    PyTorch Dataset for loading time series, labels, and flat features from HDF5 files.
-    """
-    def __init__(self, data_dir, debug=False):
-        """
-        Args:
-        - data_dir (str): Path to the dataset directory (e.g., 'train', 'val', 'test')
-        """
+import h5py
+import numpy as np
+import pandas as pd
+
+
+class MultiModalDataset(Dataset):
+    def __init__(self, data_path):
         
-        self.data_dir = data_dir
-        stays_path = os.path.join(data_dir, "stays.txt")
-        self.patients = pd.read_csv(stays_path, header=None)[0].tolist()   
-        if debug:
-            self.patients = self.patients[:10]
+        self.data_path = data_path
+        self.ts_h5_file = os.path.join(self.data_path, 'ts_each_patient_np.h5')
+        self.risks_h5_file = os.path.join(self.data_path, 'risk_scores_each_patient_np.h5')
+        self.flat_h5_file = os.path.join(self.data_path, 'flat.h5')
+        
+        self.ts_h5f = h5py.File(self.ts_h5_file, 'r')
+        self.risk_h5f = h5py.File(self.risks_h5_file, 'r')
+        self.flat_data = pd.read_hdf(self.flat_h5_file)
+        
+        self.patient_ids = list(self.ts_h5f.keys())
 
     def __len__(self):
-        return len(self.patients)
+        return len(self.patient_ids)
 
-    def __getitem__(self,idx):
+    def __getitem__(self, idx):
+        patient_id = self.patient_ids[idx]
         
-        patient_id = self.patients[idx]
- 
-        # **load time series**
-        with pd.HDFStore(os.path.join(self.data_dir, "timeseries.h5")) as store:
-            timeseries = store.get("/table").loc[patient_id] 
-            ts_len = len(timeseries) 
-            timeseries = torch.tensor(timeseries.values, dtype=torch.float)
+        ts_data = self.ts_h5f[patient_id][:]
+        risk_data = self.risk_h5f[patient_id][:]
+        
+        flat_data = self.flat_data.loc[int(patient_id)].values
+        
+        ts_data = torch.tensor(ts_data, dtype=torch.float32)
+        flat_data = torch.tensor(flat_data, dtype=torch.float32)
+        risk_data = torch.tensor(risk_data, dtype=torch.float32)
+        
+        return patient_id, ts_data, flat_data, risk_data
 
-        # ** flat features**
-        with pd.HDFStore(os.path.join(self.data_dir, "flat.h5")) as store:
-            flat = store.get("/table").loc[patient_id].values 
-            flat = torch.tensor(flat, dtype=torch.float)
+    def close(self):
+        self.ts_h5f.close()
+        self.risk_h5f.close()
 
-        # ** labels**
-        with pd.HDFStore(os.path.join(self.data_dir, "labels.h5")) as store:
-            label = store.get("/table").loc[patient_id, "discharge_risk_category"] 
-            label = torch.tensor(label, dtype=torch.long)
-
-        return patient_id,timeseries, ts_len,flat, label
-
-
+    
 def collate_fn(batch):
-    """Dynamic padding for batch processing."""
-    ids,seqs,ts_lens, flats, labels = zip(*batch)
-
-    seq_lengths = torch.tensor(ts_lens, dtype=torch.long)   # lengths of each sequence in the batch
-
-    seqs_padded = pad_sequence(seqs, batch_first=True, padding_value=-9999)   # pad with -1
-
-    flats = torch.stack(flats).float()
-    labels = torch.tensor(labels).long()
-    ids = torch.tensor(ids).long()
-
-    return (flats,seqs_padded, seq_lengths), labels, ids
+    patient_ids, ts_data, flat_data, risks_data = zip(*batch)
+    
+    patient_ids, ts_data, flat_data, risk_data = zip(*batch)
+    
+    lengths = [x.shape[0] for x in ts_data]
+    lengths, sorted_idx = torch.sort(torch.tensor(lengths), descending=True)
+    
+    ts_data = [ts_data[i] for i in sorted_idx]
+    risk_data = [risk_data[i] for i in sorted_idx]
+    flat_data = torch.stack([flat_data[i] for i in sorted_idx])
+    
+    padding_value = -99 
+    padded_ts_data = pad_sequence(ts_data, batch_first=True, padding_value=padding_value)
+    padded_risk_data = pad_sequence(risk_data, batch_first=True, padding_value=padding_value)
+    
+    return patient_ids, padded_ts_data, flat_data, padded_risk_data
 

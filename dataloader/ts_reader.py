@@ -31,9 +31,8 @@ class MultiModalDataset(Dataset):
     def __getitem__(self, idx):
         patient_id = self.patient_ids[idx]
         
-        ts_data = self.ts_h5f[patient_id][:]
+        ts_data = self.ts_h5f[patient_id][:, 1:]  # exclude the first column which is the time
         risk_data = self.risk_h5f[patient_id][:]
-        
         flat_data = self.flat_data.loc[int(patient_id)].values
         
         ts_data = torch.tensor(ts_data, dtype=torch.float32)
@@ -48,7 +47,6 @@ class MultiModalDataset(Dataset):
 
     
 def collate_fn(batch):
-    patient_ids, ts_data, flat_data, risks_data = zip(*batch)
     
     patient_ids, ts_data, flat_data, risk_data = zip(*batch)
     

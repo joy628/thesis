@@ -40,30 +40,6 @@ class GraphDataset(InMemoryDataset):
         return self.graph_data
 
 
- 
-# def graph_loader(graph_dataset, lstm_loader, sizes, batch_size, shuffle, device):
-#     """
-#     Creates a dynamic NeighborSampler for each batch based on lstm_loader patient_ids.
-#     """
-
-#     for patient_ids, ts_data, flat_data, risk_data in lstm_loader:
-#         # 确保 `patient_ids` 作为 Graph 的索引
-#         patient_ids_tensor = torch.tensor([int(pid) for pid in patient_ids], dtype=torch.long, device=device)
-        
-#         # 获取 graph_data 中匹配的索引
-#         graph_patient_ids = graph_dataset.graph_data.patient_ids.to(device)
-#         batch_indices = torch.tensor([torch.where(graph_patient_ids == pid)[0][0] for pid in patient_ids_tensor], device=device)
-
-#         # 使用动态 `node_idx` 创建 NeighborSampler
-#         loader = NeighborSampler(
-#             graph_dataset.graph_data.edge_index.to(device),
-#             node_idx=batch_indices,  # 仅采样当前 batch 的患者
-#             sizes=sizes,
-#             batch_size=batch_size,
-#             shuffle=shuffle
-#         )
-
-#         yield loader 
 
 # def graph_loader(graph_dataset, patient_ids, sizes, batch_size, shuffle, device):
 #     """

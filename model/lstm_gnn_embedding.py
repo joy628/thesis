@@ -50,7 +50,7 @@ class RiskPredictor(nn.Module):
         graph_emb_expanded = graph_emb.unsqueeze(1).expand(-1, ts_emb.size(1), -1)
         
         combined = torch.cat((flat_emb_expanded, graph_emb_expanded, ts_emb), dim=2) # shape = (batch_size, time_steps, hidden_dim*2+hidden_dim*2+hidden_dim*2)
-        x = F.relu(self.fc1(combined))
+        x = F.relu(self.fc1(combined))  # shape = (batch_size, time_steps, hidden_dim)
         risk_score = torch.sigmoid(self.fc2(x)).squeeze(-1)  # Output shape: (batch_size, time_steps)
         return risk_score , combined
     

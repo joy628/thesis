@@ -47,19 +47,22 @@ class MultiModalDataset(Dataset):
 
     
 def collate_fn(batch):
-    
-    patient_ids, ts_data, flat_data, risk_data = zip(*batch)
-    
-    lengths = [x.shape[0] for x in ts_data]
-    lengths, sorted_idx = torch.sort(torch.tensor(lengths), descending=True)
-    
-    ts_data = [ts_data[i] for i in sorted_idx]
-    risk_data = [risk_data[i] for i in sorted_idx]
-    flat_data = torch.stack([flat_data[i] for i in sorted_idx])
-    
-    padding_value = -99 
-    padded_ts_data = pad_sequence(ts_data, batch_first=True, padding_value=padding_value)
-    padded_risk_data = pad_sequence(risk_data, batch_first=True, padding_value=padding_value)
-    
-    return patient_ids, padded_ts_data, flat_data, padded_risk_data
+    patient_ids, ts_list, flat_list, risk_list = zip(*batch)
+    lengths = [x.shape[0] for x in ts_list]
+    lengths = torch.tensor(lengths, dtype=torch.long)
+
+    # order by length
+    lengths, sorted_idx = torch.sort(lengths, descending=True)
+    ts_list = [ts_list[i] for i in sorted_idx]
+    risk_list = [risk_list[i] for i in sorted_idx]
+    flat_list = [flat_list[i] for i in sorted_idx]
+    patient_ids = [patient_ids[i] for i in sorted_idx]
+
+    # pad sequences
+    padding_value = -99
+    padded_ts = pad_sequence(ts_list, batch_first=True, padding_value=padding_value)
+    padded_risk = pad_sequence(risk_list, batch_first=True, padding_value=padding_value)
+    flat_data = torch.stack(flat_list)
+
+    return patient_ids, padded_ts, flat_data, padded_risk, lengths
 

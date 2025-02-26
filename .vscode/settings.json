@@ -1,0 +1,6 @@
+{
+    "python.analysis.typeEvaluation.enableReachabilityAnalysis": true,
+    "python.defaultInterpreterPath": "/home/mei/anaconda3/envs/eicu/bin/python",
+    "python.envFile": "${workspaceFolder}/.env",
+    "python.experiments.enabled": false
+}

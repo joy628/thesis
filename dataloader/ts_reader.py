@@ -15,7 +15,7 @@ class MultiModalDataset(Dataset):
     def __init__(self, data_path):
         
         self.data_path = data_path
-        self.ts_h5_file = os.path.join(self.data_path, 'ts_each_patient_np.h5')
+        self.ts_h5_file = os.path.join(self.data_path, 'ts_each_patient_np_marker.h5')
         self.risks_h5_file = os.path.join(self.data_path, 'risk_scores_each_patient_np.h5')
         self.flat_h5_file = os.path.join(self.data_path, 'flat.h5')
         

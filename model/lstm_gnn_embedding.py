@@ -32,14 +32,14 @@ class GraphEncoder(nn.Module):
 class TimeSeriesEncoder(nn.Module):
     def __init__(self, input_dim, hidden_dim):
         super(TimeSeriesEncoder, self).__init__()
-        self.lstm = nn.LSTM(input_dim, hidden_dim, batch_first=True, bidirectional=True)
+        self.lstm = nn.LSTM(input_dim, hidden_dim, batch_first=True, bidirectional=False) # bi: false
 
     def forward(self, x, lengths):
         # print(f"Time series Encoder input: x.shape = {x.shape}, lengths.shape = {lengths.shape}")
         packed = pack_padded_sequence(x, lengths.cpu(), batch_first=True, enforce_sorted=True)
         # print(f"packed sequence batch_sizes = {packed.batch_sizes}") # print the batch_sizes
         packed_out, _ = self.lstm(packed)
-        out, _ = pad_packed_sequence(packed_out, batch_first=True, padding_value=-99)
+        out, _ = pad_packed_sequence(packed_out, batch_first=True, padding_value=-99) # padding value = 0 
         # print(f"Time series Encoder output: out.shape = {out.shape}")
         return out   # shape = (batch_size, seq_len, hidden_dim*2)
 

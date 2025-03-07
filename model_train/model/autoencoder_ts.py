@@ -4,18 +4,18 @@ from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 
 
 class TimeSeriesAutoencoder(nn.Module):
-    def __init__(self, input_dim, hidden_dim, lstm_layers):
+    def __init__(self, input_dim, hidden_dim):
         super(TimeSeriesAutoencoder, self).__init__()
         self.hidden_dim = hidden_dim
         self.encoder = nn.LSTM(
             input_dim, hidden_dim, 
-            num_layers=lstm_layers, 
+            num_layers=2, 
             batch_first=True, 
             bidirectional=False, 
         )
         self.decoder = nn.LSTM(
             hidden_dim, hidden_dim, 
-            num_layers=lstm_layers, 
+            num_layers=2, 
             batch_first=True, 
             bidirectional=False, 
         )

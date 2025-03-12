@@ -1,7 +1,8 @@
 import torch
 import torch.nn as nn
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
-
+from torch.nn import Transformer
+import math
 
 class TimeSeriesAutoencoder(nn.Module):
     def __init__(self, input_dim, hidden_dim):
@@ -9,32 +10,30 @@ class TimeSeriesAutoencoder(nn.Module):
         self.hidden_dim = hidden_dim
         self.encoder = nn.LSTM(
             input_dim, hidden_dim, 
-            num_layers=2, 
+            num_layers=4, 
             batch_first=True, 
             bidirectional=False, 
         )
         self.decoder = nn.LSTM(
             hidden_dim, hidden_dim, 
-            num_layers=2, 
+            num_layers=4, 
             batch_first=True, 
             bidirectional=False, 
         )
         self.output_layer = nn.Linear(hidden_dim, input_dim)
 
-    def forward(self, x, lengths):
+    def forward(self, x, lengths, decoder_h=True):
         ## encoder 
-        # pack, use the length of the sequence to avoid unnecessary computation
-
         packed = pack_padded_sequence(x, lengths.cpu(), batch_first=True, enforce_sorted=False)
         packed_output, (h, c) = self.encoder(packed)  # packed_output: shape = (batch_size, seq_len, hidden_dim)
-        
-        # unpack, back to original shape
         encoder_output, _ = pad_packed_sequence(packed_output, batch_first=True)  # shape = (batch_size, seq_len, hidden_dim)
    
-        
         ## decoder
-        decoder_input = torch.zeros(x.size(0), x.size(1), self.hidden_dim).to(x.device)  # shape = (batch_size, seq_len, hidden_dim)
-        
+        if decoder_h == True:
+            decoder_input = h[-1].unsqueeze(1).repeat(1, x.size(1), 1) 
+        else:
+            decoder_input = torch.zeros(x.size(0), x.size(1), self.hidden_dim).to(x.device)  # shape = (batch_size, seq_len, hidden_dim)
+            
         packed_decoder_input = pack_padded_sequence(decoder_input, lengths.cpu(), batch_first=True, enforce_sorted=False)
         packed_output, _ = self.decoder(packed_decoder_input, (h, c))
         decoder_output, _ = pad_packed_sequence(packed_output, batch_first=True)  # shape = (batch_size, seq_len, hidden_dim)
@@ -44,20 +43,45 @@ class TimeSeriesAutoencoder(nn.Module):
                 
         return output, encoder_output
 
-# class TimeSeriesAutoencoder(nn.Module):
-#     def __init__(self, input_dim, hidden_dim, lstm_layers, dropout):
-#         super(TimeSeriesAutoencoder, self).__init__()
-#         self.encoder = nn.LSTM(input_dim, hidden_dim, num_layers=lstm_layers, batch_first=True, bidirectional=False, dropout=dropout)
-#         self.decoder = nn.LSTM(hidden_dim, input_dim, num_layers=lstm_layers, batch_first=True, bidirectional=False, dropout=dropout)
-#         self.output_layer = nn.Linear(input_dim, input_dim)
+class PositionalEncoding(nn.Module):
+    def __init__(self, d_model, max_len=6000):
+        super(PositionalEncoding, self).__init__()
+        self.dropout = nn.Dropout(p=0.1)
 
-#     def forward(self, x, lengths):
-#         packed = pack_padded_sequence(x, lengths.cpu(), batch_first=True, enforce_sorted=False)
-#         _, (h, _) = self.encoder(packed)  
-#         h = h.squeeze(0)  
+        pe = torch.zeros(max_len, d_model)
+        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        pe = pe.unsqueeze(0).transpose(0, 1)
+        self.register_buffer('pe', pe)
 
-#         h_repeated = h.unsqueeze(1).repeat(1, x.shape[1], 1)
-#         output, _ = self.decoder(h_repeated)
-#         output = self.output_layer(output)  
+    def forward(self, x):
+        x = x + self.pe[:x.size(0), :]
+        return self.dropout(x)
+    
+class TransformerAutoencoder(nn.Module):
+    def __init__(self, input_dim, hidden_dim, num_heads, num_layers):
+        super(TransformerAutoencoder, self).__init__()
+        self.positional_encoding = PositionalEncoding(input_dim)
+        self.encoder = Transformer(
+            d_model=input_dim,
+            nhead=num_heads,
+            num_encoder_layers=num_layers,
+            num_decoder_layers=num_layers,
+            dim_feedforward=hidden_dim,
+            dropout=0.1,
+            batch_first=True
+            )
+        self.fc = nn.Linear(input_dim, input_dim)
 
-#         return output, h  
+    def forward(self, x):
+        x = self.positional_encoding(x)
+
+        # Encoder
+        memory = self.encoder(src=x, tgt=x)
+
+        # Decoder
+        output = self.fc(memory)
+        return output
+

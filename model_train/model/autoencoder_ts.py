@@ -6,37 +6,50 @@ import math
 import random
 
 class TimeSeriesAutoencoder(nn.Module):
-    def __init__(self, input_dim, hidden_dim):
+    def __init__(self, input_dim, hidden_dim, num_layers):
         super(TimeSeriesAutoencoder, self).__init__()
         self.hidden_dim = hidden_dim
         self.encoder = nn.LSTM(
             input_dim, hidden_dim, 
-            num_layers=4, 
+            num_layers=num_layers, 
             batch_first=True, 
-            bidirectional=False, 
+            bidirectional=False 
         )
         self.decoder = nn.LSTM(
             hidden_dim, hidden_dim, 
             num_layers=4, 
             batch_first=True, 
-            bidirectional=False, 
+            bidirectional=False
         )
         self.output_layer = nn.Linear(hidden_dim, input_dim)
 
-    def forward(self, x, lengths):
+    def forward(self, x, lengths, teacher_forcing=True, teacher_forcing_ratio=0.5):
+        
+        _, seq_len, _ = x.shape
+        
         ## encoder 
         packed = pack_padded_sequence(x, lengths.cpu(), batch_first=True, enforce_sorted=False)
         packed_output, (h, c) = self.encoder(packed)  # packed_output: shape = (batch_size, seq_len, hidden_dim)
         encoder_output, _ = pad_packed_sequence(packed_output, batch_first=True)  # shape = (batch_size, seq_len, hidden_dim)
-   
-        ## decoder
-        decoder_input = h[-1].unsqueeze(1).repeat(1, x.size(1), 1) # shape = (batch_size, seq_len, hidden_dim)    
-        packed_decoder_input = pack_padded_sequence(decoder_input, lengths.cpu(), batch_first=True, enforce_sorted=False) # shape = (batch_size, seq_len, hidden_dim)
-        packed_output, _ = self.decoder(packed_decoder_input, (h, c))
-        decoder_output, _ = pad_packed_sequence(packed_output, batch_first=True)  # shape = (batch_size, seq_len, hidden_dim)
-                
-        ## output layer
-        output = self.output_layer(decoder_output)  # shape = (batch_size, seq_len, input_dim)
+        
+        if teacher_forcing:   
+            outputs = torch.zeros_like(x, device=x.device)  # (batch_size, seq_len, input_size)
+            decoder_input = x[:, -1, :]  # shape: (batch_size, input_size)
+            hidden = (h, c)
+            for t in range(seq_len):
+                lstm_out, hidden = self.decoder(decoder_input.unsqueeze(1), hidden)
+                decoder_output = self.output_layer(lstm_out.squeeze(1))  
+                outputs[:, t, :] = decoder_output
+                # Teacher Forcing 
+                decoder_input = x[:, t, :] if random.random() < teacher_forcing_ratio else decoder_output
+        else:       
+            ## decoder
+            decoder_input = h[-1].unsqueeze(1).repeat(1, seq_len, 1) # shape = (batch_size, seq_len, hidden_dim)    
+            packed_decoder_input = pack_padded_sequence(decoder_input, lengths.cpu(), batch_first=True, enforce_sorted=False) # shape = (batch_size, seq_len, hidden_dim)
+            packed_output, _ = self.decoder(packed_decoder_input, (h, c))
+            decoder_output, _ = pad_packed_sequence(packed_output, batch_first=True)  # shape = (batch_size, seq_len, hidden_dim)            
+            ## output layer
+            output = self.output_layer(decoder_output)  # shape = (batch_size, seq_len, input_dim)
                 
         return output, encoder_output
     
@@ -83,84 +96,37 @@ class TransformerAutoencoder(nn.Module):
         output = self.fc(memory)
         return output
 
-
-
-class lstm_encoder(nn.Module):
-    def __init__(self, input_size, hidden_size, num_layers=1):
-        super(lstm_encoder, self).__init__()
-        self.input_size = input_size
-        self.hidden_size = hidden_size
-        self.num_layers = num_layers
-
-        self.lstm = nn.LSTM(input_size=input_size, hidden_size=hidden_size, num_layers=num_layers, batch_first=True)
-
-    def forward(self, x_input, lengths):
-        
-        lengths = lengths.cpu()
     
-        packed_input = pack_padded_sequence(x_input, lengths, batch_first=True, enforce_sorted=False)
-        
-        packed_output, hidden = self.lstm(packed_input)
-        
-        lstm_out, _ = pad_packed_sequence(packed_output, batch_first=True)
-        
-        return lstm_out, hidden
-
-
-class lstm_decoder(nn.Module):
-
-    def __init__(self, input_size, hidden_size, num_layers=1):
-
-        super(lstm_decoder, self).__init__()
-        self.input_size = input_size
-        self.hidden_size = hidden_size
+    
+class LSTMTFAutoencoder(nn.Module):
+    def __init__(self, input_dim, hidden_dim, num_layers):
+        super(LSTMTFAutoencoder,self).__init__()
+        self.hidden_dim = hidden_dim
         self.num_layers = num_layers
 
-        self.lstm = nn.LSTM(input_size=input_size, hidden_size=hidden_size, num_layers=num_layers, batch_first=True)
-        self.linear = nn.Linear(hidden_size, input_size)  # Linear layer to map hidden state to output
+        self.encoder_lstm = nn.LSTM(input_dim, hidden_dim, num_layers, batch_first=True,bidirectional=False,)
+        self.decoder_lstm = nn.LSTM(input_dim, hidden_dim, num_layers, batch_first=True,bidirectional=False,)
 
-    def forward(self, x_input, encoder_hidden_states):
+        self.output_layer = nn.Linear(hidden_dim, input_dim)
 
-        lstm_out, hidden = self.lstm(x_input.unsqueeze(1), encoder_hidden_states)  # Add sequence dimension
-        output = self.linear(lstm_out.squeeze(1))  # Remove sequence dimension
-        return output, hidden
+    def forward(self, x, lengths, teacher_forcing_ratio=0.5):
+        _, seq_len, _ = x.shape
 
+        # encoder
+        packed_x = pack_padded_sequence(x, lengths.cpu(), batch_first=True, enforce_sorted=False)
+        packed_out, hidden = self.encoder_lstm(packed_x)
+        encoder_out, _ = pad_packed_sequence(packed_out, batch_first=True)
 
-class lstm_autoencoder(nn.Module):
-    def __init__(self, input_size, hidden_size, num_layers=1):
-        super(lstm_autoencoder, self).__init__()
-        self.input_size = input_size
-        self.hidden_size = hidden_size
-        self.num_layers = num_layers
+        # decoder
+        outputs = torch.zeros_like(x, device=x.device)  # (batch_size, seq_len, input_size)
+        decoder_input = x[:, -1, :]  # shape: (batch_size, input_size)
 
-        # Define encoder and decoder
-        self.encoder = lstm_encoder(input_size=input_size, hidden_size=hidden_size, num_layers=num_layers)
-        self.decoder = lstm_decoder(input_size=input_size, hidden_size=hidden_size, num_layers=num_layers)
-
-    def forward(self, x_input, lengths, teacher_forcing_ratio=0.5):
-        batch_size, seq_len, _ = x_input.shape
-
-        # Encode the input sequence
-        encoder_output, encoder_hidden = self.encoder(x_input, lengths)
-
-        # Initialize decoder input with the last element of the input sequence
-        decoder_input = x_input[:, -1, :]  # shape: (batch_size, input_size)
-        decoder_hidden = encoder_hidden
-
-        # Initialize tensor to store reconstructed outputs
-        outputs = torch.zeros(batch_size, seq_len, self.input_size, device=x_input.device)
-
-        # Decode step-by-step
         for t in range(seq_len):
-            decoder_output, decoder_hidden = self.decoder(decoder_input, decoder_hidden)
+            lstm_out, hidden = self.decoder_lstm(decoder_input.unsqueeze(1), hidden)
+            decoder_output = self.output_layer(lstm_out.squeeze(1))  
             outputs[:, t, :] = decoder_output
 
-            # Decide whether to use teacher forcing
-            if random.random() < teacher_forcing_ratio:
-                # Use ground truth as the next input
-                decoder_input = x_input[:, t, :]
-            else:
-                # Use the decoder's output as the next input
-                decoder_input = decoder_output
+            # Teacher Forcing 
+            decoder_input = x[:, t, :] if random.random() < teacher_forcing_ratio else decoder_output
 
-        return outputs, encoder_output
+        return outputs, encoder_out

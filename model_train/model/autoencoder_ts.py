@@ -95,7 +95,6 @@ class TransformerAutoencoder(nn.Module):
         # Decoder
         output = self.fc(memory)
         return output
-
     
     
 class LSTMTFAutoencoder(nn.Module):
@@ -130,3 +129,52 @@ class LSTMTFAutoencoder(nn.Module):
             decoder_input = x[:, t, :] if random.random() < teacher_forcing_ratio else decoder_output
 
         return outputs, encoder_out
+    
+    
+    
+######  transformer encoder decoder
+
+class TransformerEncoderDecoder(nn.Module):
+    def __init__(self, input_dim, d_model, nhead, num_encoder_layers, num_decoder_layers, dim_feedforward, dropout=0.1):
+        super(TransformerEncoderDecoder, self).__init__()
+        self.d_model = d_model
+
+        self.input_embedding = nn.Linear(input_dim, d_model)
+        
+        self.positional_encoding = PositionalEncoding(d_model)
+        
+        # Transformer encoder
+        encoder_layer = nn.TransformerEncoderLayer(d_model, nhead, dim_feedforward, dropout,batch_first=True)
+        self.encoder = nn.TransformerEncoder(encoder_layer, num_encoder_layers)
+        
+        # Transformer decoder
+        decoder_layer = nn.TransformerDecoderLayer(d_model, nhead, dim_feedforward, dropout,batch_first=True)
+        self.decoder = nn.TransformerDecoder(decoder_layer, num_decoder_layers)
+        
+        # outputlayer
+        self.output_layer = nn.Linear(d_model, input_dim)
+
+    def forward(self, src):
+        """
+        :param src: shape = (batch_size, seq_len, input_dim)
+        :param tgt: shape = (batch_size, seq_len, input_dim)
+        :return output: shape = (batch_size, seq_len, input_dim)
+        """
+        batch_size, seq_len, input_dim = src.size()
+        tgt = torch.cat([torch.zeros(batch_size, 1, input_dim, device=src.device), src[:, :-1, :]], dim=1) # shape 
+
+        src = self.input_embedding(src) * math.sqrt(self.d_model)
+        src = self.positional_encoding(src)
+        
+        tgt = self.input_embedding(tgt) * math.sqrt(self.d_model)
+        tgt = self.positional_encoding(tgt)
+        
+        # encoder
+        memory = self.encoder(src)
+        
+        # decoder
+        output = self.decoder(tgt, memory)
+        
+        #ouput layer
+        output = self.output_layer(output)
+        return output

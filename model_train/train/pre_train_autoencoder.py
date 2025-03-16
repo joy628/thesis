@@ -161,3 +161,35 @@ def calculate_correlation(outputs, inputs, mask):
         corr, _ = pearsonr(valid_input, valid_output)
         batch_correlations.append(corr)
     return sum(batch_correlations) / len(batch_correlations)
+
+def overfit_model(model, num_epochs,dataloader, optimizer,device,hidden=False,attention=False,teacher_forcing=False,transformer=False):
+    num_epochs = 500  
+    for epoch in range(num_epochs):
+        model.train()
+        for batch in dataloader:
+            inputs, lengths = batch
+            inputs = inputs.to(device)
+            lengths = lengths.to(device)
+
+            optimizer.zero_grad()
+            if hidden:
+               outputs, _ = model(inputs, lengths,attention = False)
+            elif attention:
+                outputs, _ = model(inputs, lengths,attention = True) 
+            elif teacher_forcing:
+                outputs, _ = model(inputs, lengths,teacher_forcing_ratio=0.5)
+            elif transformer:
+                outputs = model(inputs)
+            mask = generate_mask(inputs.size(1), lengths,device)
+            loss = masked_mae_loss(outputs, inputs, mask)
+            corr = calculate_correlation(outputs, inputs, mask)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            
+            loss.backward()
+            optimizer.step()
+    
+            torch.cuda.empty_cache()
+            torch.cuda.memory_reserved(0)
+            
+        if (epoch + 1) % 50 == 0:
+            print(f"Epoch {epoch+1}, Loss: {loss.item():.6f},Correlation: {corr:.6f}")

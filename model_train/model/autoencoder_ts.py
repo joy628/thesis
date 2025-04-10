@@ -1,339 +1,203 @@
-   
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
-
 from einops import rearrange
 
 
- #####  dense vital signs autoencoder
+class DepthwiseCausalConv(nn.Module):
+    def __init__(self, in_channels, kernel_size):
+        super().__init__()
+        self.depthwise = nn.Conv1d(
+            in_channels=in_channels,
+            out_channels=in_channels,
+            kernel_size=kernel_size,
+            groups=in_channels,
+            padding=kernel_size - 1,
+            bias=False
+        )
 
+    def forward(self, x):
+        # x: [B, T, C] → [B, C, T]
+        x = x.transpose(1, 2)
+        out = self.depthwise(x)
+        # remove future leakage
+        out = out[:, :, :-self.depthwise.padding[0]]
+        return out.transpose(1, 2)
 
-class ProbSparseAttention(nn.Module):
+class ProbSparseCausalAttention(nn.Module):
     def __init__(self, dim, n_heads, factor=5, dropout=0.1):
-        super(ProbSparseAttention, self).__init__()
-        self.dim = dim
+        super().__init__()
         self.n_heads = n_heads
         self.head_dim = dim // n_heads
-        self.factor = factor
+        self.scale = self.head_dim ** -0.5
+
+        self.q_proj = nn.Linear(dim, dim)
+        self.k_proj = nn.Linear(dim, dim)
+        self.v_proj = nn.Linear(dim, dim)
+        self.out_proj = nn.Linear(dim, dim)
         self.dropout = nn.Dropout(dropout)
 
-        self.query = nn.Linear(dim, dim)
-        self.key = nn.Linear(dim, dim)
-        self.value = nn.Linear(dim, dim)
-        self.out = nn.Linear(dim, dim)
-
     def forward(self, x):
-        batch_size, seq_len, _ = x.shape
+        B, T, D = x.size()
+        q = self.q_proj(x).view(B, T, self.n_heads, self.head_dim).transpose(1, 2)  # B, H, T, D
+        k = self.k_proj(x).view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
+        v = self.v_proj(x).view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
 
-        # calculate Query, Key, Value
-        q = self.query(x).view(batch_size, seq_len, self.n_heads, self.head_dim).transpose(1, 2)
-        k = self.key(x).view(batch_size, seq_len, self.n_heads, self.head_dim).transpose(1, 2)
-        v = self.value(x).view(batch_size, seq_len, self.n_heads, self.head_dim).transpose(1, 2)
+        scores = torch.matmul(q, k.transpose(-2, -1)) * self.scale  # B, H, T, T
+        mask = torch.tril(torch.ones(T, T, device=x.device)).unsqueeze(0).unsqueeze(0)  # causal mask
+        scores = scores.masked_fill(mask == 0, float('-inf'))
+        attn = F.softmax(scores, dim=-1)
+        attn = self.dropout(attn)
 
-        # calculate scores
-        scores = torch.matmul(q, k.transpose(-2, -1)) / torch.sqrt(torch.tensor(self.head_dim, dtype=torch.float32))
-
-        # select top-k scores
-        _, topk_indices = torch.topk(scores, k=self.factor, dim=-1)
-        sparse_scores = torch.zeros_like(scores)
-        sparse_scores.scatter_(-1, topk_indices, scores.gather(-1, topk_indices))
-
-        # calculate attention weights
-        attn_weights = F.softmax(sparse_scores, dim=-1)
-        attn_weights = self.dropout(attn_weights)
-
-        # weighted sum of values
-        out = torch.matmul(attn_weights, v)
-        out = out.transpose(1, 2).contiguous().view(batch_size, seq_len, self.dim)
-        out = self.out(out)
-
-        return out
-
-    def sparsify(self, scores):
-        # simple top-k selection
-        _, topk_indices = torch.topk(scores, k=self.factor, dim=-1)
-        sparse_scores = torch.zeros_like(scores)
-        sparse_scores.scatter_(-1, topk_indices, scores.gather(-1, topk_indices))
-        return sparse_scores
+        out = torch.matmul(attn, v)  # B, H, T, D
+        out = out.transpose(1, 2).contiguous().view(B, T, D)
+        return self.out_proj(out)
 
 
-class InformerAttention(nn.Module):
-    def __init__(self, dim, seq_len, factor, n_heads, dropout=0.1):
-        super(InformerAttention, self).__init__()
-        self.dim = dim
-        self.seq_len = seq_len
-        self.factor = factor
-        self.n_heads = n_heads
-        self.dropout = dropout
-
-        self.attention = ProbSparseAttention(dim, n_heads, factor, dropout)
-        self.norm = nn.LayerNorm(dim)
+class CausalInformerBlock(nn.Module):
+    def __init__(self, dim, n_heads, dropout=0.1):
+        super().__init__()
+        self.attn = ProbSparseCausalAttention(dim, n_heads, dropout=dropout)
+        self.norm1 = nn.LayerNorm(dim)
         self.ffn = nn.Sequential(
-            nn.Linear(dim, dim * 4),
-            nn.ReLU(),
-            nn.Linear(dim * 4, dim)
+            nn.Linear(dim, dim * 4), nn.ReLU(), nn.Linear(dim * 4, dim)
         )
+        self.norm2 = nn.LayerNorm(dim)
 
     def forward(self, x):
-        # Self-Attention
-        attn_out = self.attention(x)
-        x = x + attn_out  
-        x = self.norm(x)
-
-        # Feed-Forward Network
-        ffn_out = self.ffn(x)
-        x = x + ffn_out  
-        x = self.norm(x)
-
+        x = self.norm1(x + self.attn(x))
+        x = self.norm2(x + self.ffn(x))
         return x
 
-
-
 class SOMLayer(nn.Module):
-    def __init__(self, grid_size, latent_dim, alpha=1.0, time_decay=0.9):
+    def __init__(self, grid_size, latent_dim, alpha=1.0, time_decay=0.9, max_seq_len=3500):
         super().__init__()
-        self.grid_size = grid_size  # e.g. [8,8]
+        self.grid_size = grid_size
         self.latent_dim = latent_dim
-        self.alpha = alpha          # parameter of Student-t distribution
-        self.time_decay = time_decay  # time decay factor
-        
-        # SOM trainable nodes
-        # shape: [grid_w, grid_h, latent_dim]
-        self.nodes = nn.Parameter(
-            torch.randn(grid_size[0], grid_size[1], latent_dim),
-            requires_grad=True
-        )
-        
-        
-    def forward(self, z):
-        """
-        input: 
-          z - shape [batch_size, seq_len, latent_dim]
-          batch_ids - the batch ids for trajectory tracking (optional)
-        output :
-          som_z -  the updated latent vector after SOM adjustment
-          losses - a dictionary containing the loss components
-        """
-        batch_size, seq_len, _ = z.shape
-        
-        # === time decay weights ===
+        self.alpha = alpha
+        self.time_decay = time_decay
+
+        self.nodes = nn.Parameter(torch.randn(grid_size[0], grid_size[1], latent_dim), requires_grad=True)
+
+        # 预生成时间权重模板
         time_weights = torch.tensor(
-            [self.time_decay ** (seq_len - t - 1) for t in range(seq_len)],
-            device=z.device
-        ).view(1, seq_len, 1)  # [1, seq_len, 1]
-        
-        # ===  weighted latent vector === 
-        # to emphasize the recent time steps
-        # shape: [batch, seq_len, latent_dim]
-        weighted_z = z * time_weights  # [batch, seq_len, latent]
-        z_flat = rearrange(weighted_z, 'b t d -> (b t) d')  # [batch*seq_len, d]
-        
-        # === compute the distance to SOM nodes ===
-        nodes_flat = self.nodes.view(-1, self.latent_dim)  # [grid_w*grid_h, d]
-        dist = torch.cdist(z_flat, nodes_flat, p=2)  # [batch*seq_len, grid_w*grid_h]
-        
-        # === soft assigment , using Student-t distribution ===
+            [time_decay ** (max_seq_len - t - 1) for t in range(max_seq_len)]
+        ).view(1, max_seq_len, 1)
+        self.register_buffer("time_weights", time_weights)
+
+    def forward(self, z):
+        batch_size, seq_len, _ = z.shape
+        time_weights = self.time_weights[:, -seq_len:, :]
+        weighted_z = z * time_weights
+        z_flat = rearrange(weighted_z, 'b t d -> (b t) d')
+
+        nodes_flat = self.nodes.view(-1, self.latent_dim)
+        # 直接使用广播差替代 torch.cdist 提高效率
+        z_expand = z_flat.unsqueeze(1)  # [B*T, 1, D]
+        nodes_expand = nodes_flat.unsqueeze(0)  # [1, N, D]
+        dist = torch.norm(z_expand - nodes_expand, dim=-1, p=2)  # [B*T, N]
+
         q = 1.0 / (1.0 + dist / self.alpha) ** ((self.alpha + 1) / 2)
-        q = F.normalize(q, p=1, dim=-1)  # normalize to the probability distribution
-        
-        # === target distribution p ===
-        p = (q ** 2) / torch.sum(q ** 2, dim=0, keepdim=True)  # normalize the columns
+        q = F.normalize(q, p=1, dim=-1)
+        p = (q ** 2) / torch.sum(q ** 2, dim=0, keepdim=True)
         p = F.normalize(p, p=1, dim=-1)
-        
-        # === compute the best matching unit (BMU) ===
+
         _, bmu_indices = torch.min(dist, dim=-1)
         bmu_indices = bmu_indices.view(batch_size, seq_len)
-        
-        # === Loss computation ===
-        # 1. KL divergence loss
-        #    between the soft assignment q and the target distribution p
-        #    KL(q || p) = sum(q * log(q / p)) = sum(q * (log(q) - log(p)))
+
         kl_loss = F.kl_div(q.log(), p.detach(), reduction='batchmean')
-        
-        # 2. the diversity loss in order to encourage the nodes to be well spread
-        diversity_loss = -torch.mean(torch.cdist(nodes_flat, nodes_flat, p=2))
-        
-        # 3. the smoothness loss between adjacent time steps to encourage temporal smoothness
-        z_prev = z[:, :-1]  # [batch, seq-1, d]
-        z_next = z[:, 1:]    # [batch, seq-1, d]
-        time_smooth_loss = F.mse_loss(z_next, z_prev) * self.time_decay
-        
-        # 4. the neighborhood consistency loss to ensure that the BMU of adjacent time steps are close in the SOM grid
-        neighbor_loss = self._neighborhood_consistency(q, bmu_indices.view(batch_size, seq_len))
-        
-        total_loss = kl_loss + 0.5*diversity_loss + 0.3*time_smooth_loss + 0.2*neighbor_loss
-        
-        # === adjust the latent vector ===
-        
-        bmu_nodes = nodes_flat[bmu_indices]  # [batch*seq_len, d]
-        som_z = z + 0.1*(bmu_nodes.view_as(z) - z)  # keep the gradient flow
-        
+        diversity_loss = -torch.mean(torch.norm(nodes_flat.unsqueeze(0) - nodes_flat.unsqueeze(1), dim=-1, p=2))
+        time_smooth_loss = F.mse_loss(z[:, 1:], z[:, :-1]) * self.time_decay
+        neighbor_loss = self._neighborhood_consistency(bmu_indices)
+
+        total_loss = kl_loss + 0.5 * diversity_loss + 0.3 * time_smooth_loss + 0.2 * neighbor_loss
+        som_z = z + 0.1 * (nodes_flat[bmu_indices.view(-1)].view_as(z) - z)
+
         return som_z, {
             "total_loss": total_loss,
             "kl_loss": kl_loss,
             "diversity_loss": diversity_loss,
             "time_smooth_loss": time_smooth_loss,
             "neighbor_loss": neighbor_loss,
-            "q": q,                  # softassignment matrix [batch*seq, grid_w*grid_h]
-            "bmu_indices": bmu_indices  # indices of the best matching unit [batch, seq]
+            "q": q,
+            "bmu_indices": bmu_indices
         }
-    
-    def _neighborhood_consistency(self, q, indices):
-        """ensure that the BMU of adjacent time steps are close in the SOM grid"""
+
+    def _neighborhood_consistency(self, indices):
         batch_size, seq_len = indices.shape
-        
-        # compute the indices of the best matching unit (BMU)
         loss = 0
         for b in range(batch_size):
-            prev_idx = indices[b, :-1]
-            next_idx = indices[b, 1:]
-            
-            # convert the indices to coordinates
-            prev_coords = torch.stack([prev_idx // self.grid_size[1], prev_idx % self.grid_size[1]], dim=1)
-            next_coords = torch.stack([next_idx // self.grid_size[1], next_idx % self.grid_size[1]], dim=1)
-            
-            # compute the manhattan distance between the coordinates
+            prev_coords = torch.stack([indices[b, :-1] // self.grid_size[1], indices[b, :-1] % self.grid_size[1]], dim=1)
+            next_coords = torch.stack([indices[b, 1:] // self.grid_size[1], indices[b, 1:] % self.grid_size[1]], dim=1)
             dist = torch.sum(torch.abs(prev_coords - next_coords), dim=1)
             loss += torch.mean(dist.float())
-            
         return loss / batch_size
-
 
 
 class Encoder(nn.Module):
     def __init__(self, n_features, embedding_dim, n_heads):
-        super(Encoder, self).__init__()
-        self.n_features = n_features
-        self.embedding_dim = embedding_dim
-        self.hidden_dim = 2 * embedding_dim
-        self.n_heads = n_heads
+        super().__init__()
+        self.causal_cnn = DepthwiseCausalConv(n_features, kernel_size=3)
+        self.lstm = nn.LSTM(n_features, embedding_dim, batch_first=True)
+        self.informer = CausalInformerBlock(embedding_dim, n_heads)
 
-        # LSTM
-        self.rnn1 = nn.LSTM(
-            input_size=self.n_features,
-            hidden_size=self.hidden_dim,
-            num_layers=1,
-            batch_first=True
-        )
-        self.rnn2 = nn.LSTM(
-            input_size=self.hidden_dim,
-            hidden_size=embedding_dim,
-            num_layers=1,
-            batch_first=True
-        )
-
-        # Informer Attention
-        self.informer = InformerAttention(
-            dim=embedding_dim,
-            seq_len=5000,
-            factor=5,
-            n_heads=n_heads,
-            dropout=0.1
-        )
-
-    def forward(self, x, true_len):
-
-
-        # LSTM
-        x_packed = pack_padded_sequence(x, true_len.cpu(), batch_first=True, enforce_sorted=False)
-        x_out, _ = self.rnn1(x_packed)  # (batch_size, max_len, hidden_dim)
-        x_out, (hidden_n, _) = self.rnn2(x_out)  # (batch_size, max_len, embedding_dim)
+    def forward(self, x, lengths):
+        x = self.causal_cnn(x)
+        packed = pack_padded_sequence(x, lengths.cpu(), batch_first=True, enforce_sorted=False)
+        x_out, _ = self.lstm(packed)
         x_out, _ = pad_packed_sequence(x_out, batch_first=True)
+        return self.informer(x_out)
 
-        # Informer Attention
-        attention_output = self.informer(x_out)  # (batch_size, max_len, embedding_dim)
-        enhanced_out = x_out + attention_output  
 
-        return enhanced_out
-    
 class Decoder(nn.Module):
-    def __init__(self, embedding_dim, n_features, n_heads):
-        super(Decoder, self).__init__()
-        self.input_dim = embedding_dim
-        self.hidden_dim = 2 * embedding_dim
-        self.n_features = n_features
-        self.n_heads = n_heads
-
-        # LSTM
-        self.rnn1 = nn.LSTM(
-            input_size=embedding_dim,
-            hidden_size=embedding_dim,
-            num_layers=1,
-            batch_first=True
+    def __init__(self, embedding_dim, n_features):
+        super().__init__()
+        self.lstm1 = nn.LSTM(embedding_dim, embedding_dim, batch_first=True)
+        self.lstm2 = nn.LSTM(embedding_dim, embedding_dim, batch_first=True)
+        self.out_proj = nn.Sequential(
+            nn.Linear(embedding_dim, embedding_dim),
+            nn.ReLU(),
+            nn.Linear(embedding_dim, n_features)
         )
-        self.rnn2 = nn.LSTM(
-            input_size=embedding_dim,
-            hidden_size=self.hidden_dim,
-            num_layers=1,
-            batch_first=True
-        )
-
-        # Informer Attention
-        self.informer_decoder = InformerAttention(
-            dim=self.hidden_dim,
-            seq_len=5000,
-            factor=5,
-            n_heads=n_heads,
-            dropout=0.1
-        )
-
-        # Output Layer
-        self.output_layer = nn.Linear(self.hidden_dim, n_features)
 
     def forward(self, x):
-        # LSTM
-        x, _ = self.rnn1(x)  # (batch_size, max_len, embedding_dim)
-        x, _ = self.rnn2(x)  # (batch_size, max_len, hidden_dim)
+        # input x: [B, T, D]
+        x1, _ = self.lstm1(x)
+        skip = x # shape [B, T, D]
+        x2, _ = self.lstm2(x1) # shape [B, T, D]
+        return self.out_proj(x2 + skip)
 
-        # Informer Attention
-        attention_output = self.informer_decoder(x)  # (batch_size, max_len, hidden_dim)
-        enhanced = x + attention_output  #
 
-        # Output Layer
-        x = self.output_layer(enhanced)  # (batch_size, max_len, n_features)
 
-        return x
-    
 class RecurrentAutoencoder(nn.Module):
-
-    def __init__(self, n_features, embedding_dim,n_heads,som_grid=[10,10]):
+    def __init__(self, n_features, embedding_dim, n_heads, som_grid=[10, 10]):
         super(RecurrentAutoencoder, self).__init__()
-
-        self.encoder = Encoder( n_features, embedding_dim,n_heads)
+        self.encoder = Encoder(n_features, embedding_dim, n_heads)
         self.som = SOMLayer(grid_size=som_grid, latent_dim=embedding_dim)
-        self.decoder = Decoder( embedding_dim, n_features,n_heads)
-        self.use_som = False
-        self._dummy_losses = None  
-    
-    def to(self, *args, **kwargs):
-        super().to(*args, **kwargs)
-        device = next(self.parameters()).device
-        self._dummy_losses = {
-            "bmu_indices": torch.zeros(1, 1, dtype=torch.long, device=device),
-            "q": torch.zeros(1, self.som.grid_size[0] * self.som.grid_size[1], device=device),
-            "total_loss": torch.tensor(0.0, device=device),
-            "kl_loss": torch.tensor(0.0, device=device),
-            "diversity_loss": torch.tensor(0.0, device=device),
-            "time_smooth_loss": torch.tensor(0.0, device=device),
-            "neighbor_loss": torch.tensor(0.0, device=device),
-        }
-        return self
-    
+        self.decoder = Decoder(embedding_dim, n_features)
+        self.use_som = True  
+
     def forward(self, x, seq_lengths):
         z_e = self.encoder(x, seq_lengths)
 
         if self.use_som:
             som_z, losses = self.som(z_e)
         else:
-            losses = self._dummy_losses.copy()
-            losses["bmu_indices"] = losses["bmu_indices"].expand(z_e.size(0), z_e.size(1))
-            losses["q"] = losses["q"].expand(z_e.size(0) * z_e.size(1), -1)
             som_z = z_e
+            dummy_shape = z_e.size(0) * z_e.size(1)
+            grid_size = self.som.grid_size[0] * self.som.grid_size[1]
+            losses = {
+                "total_loss": torch.tensor(0.0, device=z_e.device),
+                "kl_loss": torch.tensor(0.0, device=z_e.device),
+                "diversity_loss": torch.tensor(0.0, device=z_e.device),
+                "time_smooth_loss": torch.tensor(0.0, device=z_e.device),
+                "neighbor_loss": torch.tensor(0.0, device=z_e.device),
+                "q": torch.zeros(dummy_shape, grid_size, device=z_e.device),
+                "bmu_indices": torch.zeros(z_e.size(0), z_e.size(1), dtype=torch.long, device=z_e.device),
+            }
 
         x_hat = self.decoder(som_z)
-
         bmu_indices = losses["bmu_indices"]
         k_x = bmu_indices // self.som.grid_size[1]
         k_y = bmu_indices % self.som.grid_size[1]
@@ -347,3 +211,21 @@ class RecurrentAutoencoder(nn.Module):
             "k": k,
             "losses": losses
         }
+
+
+
+############################3
+# Input
+#   ↓
+# Depthwise Causal CNN  ⟶ 保证时间因果性
+#   ↓
+# LSTM
+#   ↓
+# Causal Informer Block ⟶ 融合稀疏注意力、保持时间顺序
+#   ↓
+# SOM Layer             ⟶ 可解释性（聚类分析 + 拓扑约束）
+#   ↓
+# Decoder (LSTM × 2 + Skip + MLP) ⟶ 强表征能力 + 跳跃连接
+#   ↓
+# Reconstruction Output
+#########################

@@ -4,7 +4,6 @@ import torch.nn.functional as F
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 from einops import rearrange
 
-
 class DepthwiseCausalConv(nn.Module):
     def __init__(self, in_channels, kernel_size):
         super().__init__()
@@ -18,10 +17,8 @@ class DepthwiseCausalConv(nn.Module):
         )
 
     def forward(self, x):
-        # x: [B, T, C] → [B, C, T]
         x = x.transpose(1, 2)
         out = self.depthwise(x)
-        # remove future leakage
         out = out[:, :, :-self.depthwise.padding[0]]
         return out.transpose(1, 2)
 
@@ -31,7 +28,6 @@ class ProbSparseCausalAttention(nn.Module):
         self.n_heads = n_heads
         self.head_dim = dim // n_heads
         self.scale = self.head_dim ** -0.5
-
         self.q_proj = nn.Linear(dim, dim)
         self.k_proj = nn.Linear(dim, dim)
         self.v_proj = nn.Linear(dim, dim)
@@ -40,20 +36,19 @@ class ProbSparseCausalAttention(nn.Module):
 
     def forward(self, x):
         B, T, D = x.size()
-        q = self.q_proj(x).view(B, T, self.n_heads, self.head_dim).transpose(1, 2)  # B, H, T, D
+        q = self.q_proj(x).view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
         k = self.k_proj(x).view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
         v = self.v_proj(x).view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
 
-        scores = torch.matmul(q, k.transpose(-2, -1)) * self.scale  # B, H, T, T
-        mask = torch.tril(torch.ones(T, T, device=x.device)).unsqueeze(0).unsqueeze(0)  # causal mask
+        scores = torch.matmul(q, k.transpose(-2, -1)) * self.scale
+        mask = torch.tril(torch.ones(T, T, device=x.device)).unsqueeze(0).unsqueeze(0)
         scores = scores.masked_fill(mask == 0, float('-inf'))
         attn = F.softmax(scores, dim=-1)
         attn = self.dropout(attn)
 
-        out = torch.matmul(attn, v)  # B, H, T, D
+        out = torch.matmul(attn, v)
         out = out.transpose(1, 2).contiguous().view(B, T, D)
         return self.out_proj(out)
-
 
 class CausalInformerBlock(nn.Module):
     def __init__(self, dim, n_heads, dropout=0.1):
@@ -77,10 +72,7 @@ class SOMLayer(nn.Module):
         self.latent_dim = latent_dim
         self.alpha = alpha
         self.time_decay = time_decay
-
         self.nodes = nn.Parameter(torch.randn(grid_size[0], grid_size[1], latent_dim), requires_grad=True)
-
-        # 预生成时间权重模板
         time_weights = torch.tensor(
             [time_decay ** (max_seq_len - t - 1) for t in range(max_seq_len)]
         ).view(1, max_seq_len, 1)
@@ -93,10 +85,9 @@ class SOMLayer(nn.Module):
         z_flat = rearrange(weighted_z, 'b t d -> (b t) d')
 
         nodes_flat = self.nodes.view(-1, self.latent_dim)
-        # 直接使用广播差替代 torch.cdist 提高效率
-        z_expand = z_flat.unsqueeze(1)  # [B*T, 1, D]
-        nodes_expand = nodes_flat.unsqueeze(0)  # [1, N, D]
-        dist = torch.norm(z_expand - nodes_expand, dim=-1, p=2)  # [B*T, N]
+        z_expand = z_flat.unsqueeze(1)
+        nodes_expand = nodes_flat.unsqueeze(0)
+        dist = torch.norm(z_expand - nodes_expand, dim=-1, p=2)
 
         q = 1.0 / (1.0 + dist / self.alpha) ** ((self.alpha + 1) / 2)
         q = F.normalize(q, p=1, dim=-1)
@@ -134,7 +125,6 @@ class SOMLayer(nn.Module):
             loss += torch.mean(dist.float())
         return loss / batch_size
 
-
 class Encoder(nn.Module):
     def __init__(self, n_features, embedding_dim, n_heads):
         super().__init__()
@@ -149,38 +139,35 @@ class Encoder(nn.Module):
         x_out, _ = pad_packed_sequence(x_out, batch_first=True)
         return self.informer(x_out)
 
-
 class Decoder(nn.Module):
-    def __init__(self, embedding_dim, n_features):
+    def __init__(self, embedding_dim, n_features, n_heads, dropout=0.1):
         super().__init__()
-        self.lstm1 = nn.LSTM(embedding_dim, embedding_dim, batch_first=True)
-        self.lstm2 = nn.LSTM(embedding_dim, embedding_dim, batch_first=True)
+        self.lstm = nn.LSTM(embedding_dim, embedding_dim, batch_first=True)
+        self.informer = CausalInformerBlock(embedding_dim, n_heads, dropout=dropout)
         self.out_proj = nn.Sequential(
+            nn.LayerNorm(embedding_dim),
             nn.Linear(embedding_dim, embedding_dim),
             nn.ReLU(),
             nn.Linear(embedding_dim, n_features)
         )
 
     def forward(self, x):
-        # input x: [B, T, D]
-        x1, _ = self.lstm1(x)
-        skip = x # shape [B, T, D]
-        x2, _ = self.lstm2(x1) # shape [B, T, D]
-        return self.out_proj(x2 + skip)
-
-
+        x_lstm, _ = self.lstm(x)
+        skip = x_lstm
+        x_attn = self.informer(x_lstm)
+        x_out = x_attn + skip
+        return self.out_proj(x_out)
 
 class RecurrentAutoencoder(nn.Module):
     def __init__(self, n_features, embedding_dim, n_heads, som_grid=[10, 10]):
         super(RecurrentAutoencoder, self).__init__()
         self.encoder = Encoder(n_features, embedding_dim, n_heads)
         self.som = SOMLayer(grid_size=som_grid, latent_dim=embedding_dim)
-        self.decoder = Decoder(embedding_dim, n_features)
-        self.use_som = True  
+        self.decoder = Decoder(embedding_dim, n_features, n_heads)
+        self.use_som = True
 
     def forward(self, x, seq_lengths):
         z_e = self.encoder(x, seq_lengths)
-
         if self.use_som:
             som_z, losses = self.som(z_e)
         else:
@@ -197,7 +184,8 @@ class RecurrentAutoencoder(nn.Module):
                 "bmu_indices": torch.zeros(z_e.size(0), z_e.size(1), dtype=torch.long, device=z_e.device),
             }
 
-        x_hat = self.decoder(som_z)
+        x_hat = self.decoder(som_z )
+
         bmu_indices = losses["bmu_indices"]
         k_x = bmu_indices // self.som.grid_size[1]
         k_y = bmu_indices % self.som.grid_size[1]
@@ -211,21 +199,3 @@ class RecurrentAutoencoder(nn.Module):
             "k": k,
             "losses": losses
         }
-
-
-
-############################3
-# Input
-#   ↓
-# Depthwise Causal CNN  ⟶ 保证时间因果性
-#   ↓
-# LSTM
-#   ↓
-# Causal Informer Block ⟶ 融合稀疏注意力、保持时间顺序
-#   ↓
-# SOM Layer             ⟶ 可解释性（聚类分析 + 拓扑约束）
-#   ↓
-# Decoder (LSTM × 2 + Skip + MLP) ⟶ 强表征能力 + 跳跃连接
-#   ↓
-# Reconstruction Output
-#########################

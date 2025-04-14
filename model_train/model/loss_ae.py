@@ -1,7 +1,7 @@
 import torch
 import torch.nn.functional as F
 import numpy as np
-
+import json
 import copy
 
 def generate_mask(seq_len, actual_lens, device):
@@ -9,6 +9,8 @@ def generate_mask(seq_len, actual_lens, device):
     arange_tensor = torch.arange(seq_len, device=device)
     mask = arange_tensor.expand(len(actual_lens), seq_len) < actual_lens.unsqueeze(1)
     return mask
+
+
 
 def compute_total_loss(output, target, lengths, model, lambda_cfg, device):
     mask = generate_mask(target.size(1), lengths, device).unsqueeze(-1)  # [B, T, 1]
@@ -71,7 +73,7 @@ def compute_total_loss(output, target, lengths, model, lambda_cfg, device):
 
 
 class TrainingScheduler:
-    def __init__(self, model, warmup_epochs=40, lambda_config=None):
+    def __init__(self, model, warmup_epochs=30, lambda_config=None):
         self.model = model
         self.warmup_epochs = warmup_epochs
         self.lambda_config = lambda_config or {
@@ -87,9 +89,9 @@ class TrainingScheduler:
     def configure_epoch(self, epoch):
         self.model.use_som = epoch >= self.warmup_epochs
 
-def train_model_som(model, train_loader, val_loader, n_epochs, save_path, device):
+def train_model_som(model, train_loader, val_loader, n_epochs, save_path, history_path,device):
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
     history = {
         'train': [], 'val': [],
         'kl_loss': [], 'diversity_loss': [], 'smooth_loss': [], 'neighbor_loss': [],
@@ -143,6 +145,8 @@ def train_model_som(model, train_loader, val_loader, n_epochs, save_path, device
 
         if epoch % 10 == 0:
             print(f"Epoch {epoch}: train loss {train_loss:.4f} val loss {val_loss:.4f} use_som={model.use_som}")
-
+        
+        with open(history_path, 'w') as f:
+             json.dump(history, f, indent=2)
     model.load_state_dict(best_model_wts)
     return model.eval(), history

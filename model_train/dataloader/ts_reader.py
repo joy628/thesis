@@ -3,8 +3,8 @@ Dataloaders for lstm_only model
 """
 import os
 import torch
-from torch.utils.data import Dataset, DataLoader
-from torch.nn.utils.rnn import pack_padded_sequence, pad_sequence
+from torch.utils.data import Dataset
+from torch.nn.utils.rnn import  pad_sequence
 
 import h5py
 import numpy as np
@@ -15,15 +15,13 @@ class MultiModalDataset(Dataset):
     def __init__(self, data_path):
         
         self.data_path = data_path
-        self.ts_h5_file = os.path.join(self.data_path, 'ts_each_patient_np_marker.h5')
-        self.risks_h5_file = os.path.join(self.data_path, 'risk_scores_each_patient_np.h5')
+        self.ts_h5_file = os.path.join(self.data_path, 'ts_each_patient.h5')
+        self.risks_h5_file = os.path.join(self.data_path, 'risk_each_patient.h5')
         self.flat_h5_file = os.path.join(self.data_path, 'flat.h5')
-        self.drug_h5_file = os.path.join(self.data_path, 'drug.h5')
         
         self.ts_h5f = h5py.File(self.ts_h5_file, 'r')
         self.risk_h5f = h5py.File(self.risks_h5_file, 'r')
         self.flat_data = pd.read_hdf(self.flat_h5_file)
-        self.drug_data = pd.read_hdf(self.drug_h5_file)
         
         self.patient_ids = list(self.ts_h5f.keys())
 
@@ -34,16 +32,16 @@ class MultiModalDataset(Dataset):
         patient_id = self.patient_ids[idx]
         
         ts_data = self.ts_h5f[patient_id][:, 1:]  # exclude the first column which is the time
-        risk_data = self.risk_h5f[patient_id][:1:] #
+        risk_data = self.risk_h5f[patient_id][:] #
         flat_data = self.flat_data.loc[int(patient_id)].values
-        drug_data = self.drug_data.loc[int(patient_id)].values
+        category = int(risk_data[0][5])
         
         ts_data = torch.tensor(ts_data, dtype=torch.float32)
         flat_data = torch.tensor(flat_data, dtype=torch.float32)
-        risk_data = torch.tensor(risk_data, dtype=torch.float32)
-        drug_data = torch.tensor(drug_data, dtype=torch.float32)
+        risk_data = torch.tensor(risk_data[:, -1], dtype=torch.float32)
+
         
-        return patient_id, ts_data, flat_data,drug_data, risk_data
+        return patient_id, flat_data,ts_data, risk_data, category
 
     def close(self):
         self.ts_h5f.close()
@@ -51,7 +49,7 @@ class MultiModalDataset(Dataset):
 
     
 def collate_fn(batch):
-    patient_ids, ts_list, flat_list, risk_list = zip(*batch)
+    patient_ids,  flat_list,ts_list, risk_list,category_list = zip(*batch)
     lengths = [x.shape[0] for x in ts_list]
     lengths = torch.tensor(lengths, dtype=torch.long)
 
@@ -61,14 +59,16 @@ def collate_fn(batch):
     risk_list = [risk_list[i] for i in sorted_idx]
     flat_list = [flat_list[i] for i in sorted_idx]
     patient_ids = [patient_ids[i] for i in sorted_idx]
+    category_list = [category_list[i] for i in sorted_idx]
 
     # pad sequences
     padding_value = 0
     padded_ts = pad_sequence(ts_list, batch_first=True, padding_value=padding_value)
     padded_risk = pad_sequence(risk_list, batch_first=True, padding_value=padding_value)
     flat_data = torch.stack(flat_list)
+    categories = torch.tensor(category_list, dtype=torch.long)
      
-    return patient_ids,  flat_data, padded_ts, padded_risk, lengths
+    return patient_ids,  flat_data, padded_ts, padded_risk, lengths,categories
 
 
 

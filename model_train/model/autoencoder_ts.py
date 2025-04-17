@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 from einops import rearrange
+import math
 
 class DepthwiseCausalConv(nn.Module):
     def __init__(self, in_channels, kernel_size):
@@ -27,28 +28,46 @@ class ProbSparseCausalAttention(nn.Module):
         super().__init__()
         self.n_heads = n_heads
         self.head_dim = dim // n_heads
+        self.factor = factor
         self.scale = self.head_dim ** -0.5
+
         self.q_proj = nn.Linear(dim, dim)
         self.k_proj = nn.Linear(dim, dim)
         self.v_proj = nn.Linear(dim, dim)
         self.out_proj = nn.Linear(dim, dim)
         self.dropout = nn.Dropout(dropout)
 
+    def _prob_Q_selection(self, q):
+        B, H, T, D = q.shape
+        q_norm = torch.sum(torch.abs(q), dim=-1)  # (B, H, T)
+        u = min(int(self.factor * math.log(T)), T)  # Top-u queries
+        index = torch.topk(q_norm, u, dim=-1)[1]  # (B, H, u)
+        return index
+
     def forward(self, x):
         B, T, D = x.size()
-        q = self.q_proj(x).view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
+        q = self.q_proj(x).view(B, T, self.n_heads, self.head_dim).transpose(1, 2)  # (B, H, T, D)
         k = self.k_proj(x).view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
         v = self.v_proj(x).view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
 
-        scores = torch.matmul(q, k.transpose(-2, -1)) * self.scale
-        mask = torch.tril(torch.ones(T, T, device=x.device)).unsqueeze(0).unsqueeze(0)
-        scores = scores.masked_fill(mask == 0, float('-inf'))
-        attn = F.softmax(scores, dim=-1)
-        attn = self.dropout(attn)
+        index = self._prob_Q_selection(q)  # (B, H, u)
 
-        out = torch.matmul(attn, v)
-        out = out.transpose(1, 2).contiguous().view(B, T, D)
+        attn_output = torch.zeros_like(q)
+        scores = torch.matmul(q, k.transpose(-2, -1)) * self.scale
+        causal_mask = torch.tril(torch.ones(T, T, device=x.device)).unsqueeze(0).unsqueeze(0)
+        scores = scores.masked_fill(causal_mask == 0, float('-inf'))
+
+        for b in range(B):
+            for h in range(self.n_heads):
+                sel_idx = index[b, h]
+                sel_scores = scores[b, h, sel_idx]
+                sel_attn = F.softmax(sel_scores, dim=-1)
+                sel_attn = self.dropout(sel_attn)
+                attn_output[b, h, sel_idx] = torch.matmul(sel_attn, v[b, h])
+
+        out = attn_output.transpose(1, 2).contiguous().view(B, T, D)
         return self.out_proj(out)
+
 
 class CausalInformerBlock(nn.Module):
     def __init__(self, dim, n_heads, dropout=0.1):

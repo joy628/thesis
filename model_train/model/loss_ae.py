@@ -91,7 +91,7 @@ class TrainingScheduler:
 
 def train_model_som(model, train_loader, val_loader, n_epochs, save_path, history_path,device):
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
     history = {
         'train': [], 'val': [],
         'kl_loss': [], 'diversity_loss': [], 'smooth_loss': [], 'neighbor_loss': [],

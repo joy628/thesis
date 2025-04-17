@@ -41,7 +41,7 @@ class TimeSeriesEncoder(nn.Module):
         return self.model(x, lengths)
 
 
-# === SOM Layer Placeholder ===
+# === SOM Layer===
 class SOMLayer(nn.Module):
     def __init__(self, som):
         super().__init__()
@@ -116,11 +116,16 @@ class PatientOutcomeModel(nn.Module):
         fused_static = self.fusion([flat_emb, graph_emb])  # [B, D]
 
         # === TS Embedding ===
-        ts_emb = self.ts_encoder(ts_data, lengths)  # [B, T, D]
+        ts_emb = self.ts_encoder(ts_data, lengths)
+        losses = {}
         if self.som_layer:
             ts_emb, losses = self.som_layer(ts_emb)
-        else:
-            losses = {}
+            if "bmu_indices" in losses:
+                bmu_indices = losses["bmu_indices"]
+                k_x = bmu_indices // self.som_layer.som.grid_size[1]
+                k_y = bmu_indices % self.som_layer.som.grid_size[1]
+                k = torch.stack([k_x, k_y], dim=-1)
+                losses["k"] = k
 
         # === Risk Prediction ===
         risk_scores, combined = self.risk_predictor(fused_static, ts_emb)

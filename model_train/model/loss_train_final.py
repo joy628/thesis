@@ -5,6 +5,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import json
 import seaborn as sns
+import os
 
 # === Risk Loss ===
 def compute_risk_loss(pred, target, lengths, categories=None):
@@ -27,7 +28,7 @@ def compute_risk_loss(pred, target, lengths, categories=None):
 class EarlyStopping:
     def __init__(self, patience=10):
         self.patience = patience
-        self.best_loss = float('inf')
+        self.best_loss = float('inf')   
         self.counter = 0
         self.best_model = None
 
@@ -112,8 +113,8 @@ def train_patient_outcome_model(model, train_loader, val_loader, graph_data, opt
 # === Training Plot  ===
 def plot_training_history(history):
     plt.figure(figsize=(10, 5))
-    plt.plot(history['train'], label='Train Loss')
-    plt.plot(history['val'], label='Validation Loss')
+    plt.plot(history['train'], label='Train Loss',marker='o')
+    plt.plot(history['val'], label='Validation Loss',marker='s')
     plt.xlabel('Epoch')
     plt.ylabel('Loss')
     plt.title('Train/Validation Loss')
@@ -132,32 +133,6 @@ def plot_training_history(history):
     plt.show()
     
 
-def visualize_som_trajectories(k_tensor, categories, grid_size=(16, 16), max_patients=2):
-    heatmap = torch.zeros(grid_size)
-    k = k_tensor.detach().cpu()
-    B, T, _ = k.shape
-    B = min(B, max_patients)
-
-    for traj in k[:B]:
-        for coord in traj:
-            i, j = coord
-            heatmap[int(i), int(j)] += 1
-
-    fig, ax = plt.subplots(figsize=(6, 6))
-    sns.heatmap(heatmap, ax=ax, cmap='YlGnBu')
-
-    for i in range(B):
-        traj = k[i].numpy()
-        color = 'g' if categories[i] == 0 else 'r'
-        ax.plot(traj[:, 1], traj[:, 0], color=color, linewidth=2)
-        ax.scatter(traj[0, 1], traj[0, 0], color=color, marker='o', s=80, label='Start' if i == 0 else "")
-        ax.scatter(traj[-1, 1], traj[-1, 0], color=color, marker='x', s=80, label='End' if i == 0 else "")
-
-    ax.set_title("SOM Trajectories")
-    ax.set_xlabel("SOM X")
-    ax.set_ylabel("SOM Y")
-    plt.legend()
-    plt.show()
     
 def evaluate_model_on_test_set(model, test_loader, graph_data, device, save_json_path=None):
     model.eval()
@@ -200,10 +175,13 @@ def evaluate_model_on_test_set(model, test_loader, graph_data, device, save_json
 
 def plot_patient_risk_trajectory(model, dataset, patient_index, graph_data, device):
     model.eval()
-    from torch.nn.utils.rnn import pad_sequence
-    import matplotlib.pyplot as plt
 
-    pid, flat, ts, risk = dataset[patient_index]
+    RISK_LABELS = ["Risk-Free", "Low Risk", "Medium Risk", "High Risk"]
+
+    if isinstance(dataset, torch.utils.data.DataLoader):
+        dataset = dataset.dataset
+
+    pid, flat, ts, risk, category = dataset[patient_index]
     flat = flat.unsqueeze(0).to(device)
     ts = ts.unsqueeze(0).to(device)
     lengths = torch.tensor([ts.shape[1]], device=device)
@@ -212,10 +190,12 @@ def plot_patient_risk_trajectory(model, dataset, patient_index, graph_data, devi
     with torch.no_grad():
         pred, _, _ = model(flat, graph_data, patient_ids, ts, lengths)
         pred = pred[0, :lengths.item()].cpu().numpy()
+        true = risk[:lengths.item()].numpy()
 
     plt.figure(figsize=(10, 4))
-    plt.plot(pred, label="Predicted Risk", marker='o')
-    plt.title(f"Risk Score Trajectory for Patient {pid}")
+    plt.plot(pred, label="Predicted Risk", linestyle=':')
+    plt.plot(true, label="True Risk", linestyle='--', alpha=0.7)
+    plt.title(f"Risk Score Trajectory - Patient {pid} ({RISK_LABELS[category]})")
     plt.xlabel("Time Step")
     plt.ylabel("Risk Score")
     plt.ylim(0, 1.05)
@@ -223,3 +203,63 @@ def plot_patient_risk_trajectory(model, dataset, patient_index, graph_data, devi
     plt.legend()
     plt.tight_layout()
     plt.show()
+    
+    
+def collect_k_and_category(model, test_loader, graph_data, device):
+    model.eval()
+    all_k = []
+    all_categories = []
+
+    with torch.no_grad():
+        for batch in test_loader:
+            patient_ids, flat_data, ts_data, risk_data, lengths, categories = batch
+            flat_data = flat_data.to(device)
+            ts_data = ts_data.to(device)
+            lengths = lengths.to(device)
+
+            patient_ids = [int(pid) for pid in patient_ids]  # 
+            categories = categories.to(device)
+
+            # forward
+            output = model(flat_data, graph_data, patient_ids, ts_data, lengths)
+            _, _, losses = output
+
+            if "k" in losses:
+                all_k.append(losses["k"].cpu())
+                all_categories.append(categories.cpu())
+
+    if len(all_k) == 0:
+        print("No SOM trajectory (k) found in model output.")
+        return None, None
+
+    all_k_tensor = torch.stack(all_k)  # [B, T, 2]
+    all_cat_tensor = torch.cat(all_categories)  # [B]
+
+    return all_k_tensor, all_cat_tensor
+
+def visualize_som_trajectories_by_category(k_tensor, category_tensor, grid_size=(10, 10), max_per_category=8, save_dir=None):
+
+    num_categories = 4
+    fig, axs = plt.subplots(1, num_categories, figsize=(5 * num_categories, 5), constrained_layout=True)
+
+    for cat in range(num_categories):
+        ax = axs[cat]
+        indices = (category_tensor == cat).nonzero(as_tuple=True)[0]
+        ax.set_title(f"Risk Category {cat} ({len(indices)})")
+        ax.set_xlim(0, grid_size[0])
+        ax.set_ylim(0, grid_size[1])
+        ax.set_xticks(range(grid_size[0]))
+        ax.set_yticks(range(grid_size[1]))
+        ax.grid(True)
+
+        for i, idx in enumerate(indices[:max_per_category]):
+            traj = k_tensor[idx].cpu().numpy()
+            ax.plot(traj[:, 0], traj[:, 1], marker='o', alpha=0.7)
+
+    if save_dir:
+        os.makedirs(save_dir, exist_ok=True)
+        save_path = os.path.join(save_dir, "som_trajectories_by_category.png")
+        plt.savefig(save_path)
+        print(f"SOM trajectories saved to {save_path}")
+    else:
+        plt.show()

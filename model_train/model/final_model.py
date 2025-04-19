@@ -91,7 +91,7 @@ class PatientOutcomeModel(nn.Module):
         self.flat_encoder = FlatFeatureEncoder(flat_input_dim, hidden_dim)
         self.graph_encoder = GraphEncoder(graph_input_dim, hidden_dim)
         self.ts_encoder = TimeSeriesEncoder(pretrained_encoder)
-        self.som_layer = SOMLayer(som) if som else None
+        self.som_layer = SOMLayer(som) if som else None   # fine tune
         self.fusion = FeatureAttentionFusion(hidden_dim, hidden_dim)
         self.risk_predictor = RiskPredictor(hidden_dim, hidden_dim, hidden_dim)
 

@@ -11,7 +11,6 @@ def generate_mask(seq_len, actual_lens, device):
     return mask
 
 
-
 def compute_total_loss(output, target, lengths, model, lambda_cfg, device):
     mask = generate_mask(target.size(1), lengths, device).unsqueeze(-1)  # [B, T, 1]
     x_hat = output['x_hat']
@@ -73,7 +72,7 @@ def compute_total_loss(output, target, lengths, model, lambda_cfg, device):
 
 
 class TrainingScheduler:
-    def __init__(self, model, warmup_epochs=30, lambda_config=None):
+    def __init__(self, model, warmup_epochs, lambda_config=None):
         self.model = model
         self.warmup_epochs = warmup_epochs
         self.lambda_config = lambda_config or {
@@ -89,7 +88,7 @@ class TrainingScheduler:
     def configure_epoch(self, epoch):
         self.model.use_som = epoch >= self.warmup_epochs
 
-def train_model_som(model, train_loader, val_loader, n_epochs, save_path, history_path,device):
+def train_model_som(model, train_loader, val_loader, n_epochs, optimizer,warmup_epochs, save_path, history_path,device):
 
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
     history = {
@@ -100,7 +99,7 @@ def train_model_som(model, train_loader, val_loader, n_epochs, save_path, histor
     best_model_wts = copy.deepcopy(model.state_dict())
     best_loss = float('inf')
 
-    scheduler = TrainingScheduler(model)
+    scheduler = TrainingScheduler(model,warmup_epochs)
 
     for epoch in range(1, n_epochs + 1):
         scheduler.configure_epoch(epoch)

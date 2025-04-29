@@ -4,6 +4,8 @@ import torch.nn.functional as F
 from torch_geometric.nn import GCNConv, BatchNorm
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 
+
+
 # === Flat Encoder ===
 class FlatFeatureEncoder(nn.Module):
     def __init__(self, input_dim, hidden_dim):
@@ -48,8 +50,8 @@ class SOMLayer(nn.Module):
         self.som = som
 
     def forward(self, x):
-        som_z, losses = self.som(x)
-        return som_z, losses
+        som_z = self.som(x)
+        return som_z
 
 # === Attention Fusion Layer ===
 class FeatureAttentionFusion(nn.Module):
@@ -75,14 +77,15 @@ class FeatureAttentionFusion(nn.Module):
 class RiskPredictor(nn.Module):
     def __init__(self, fused_dim, ts_dim, hidden_dim):
         super().__init__()
-        self.fc1 = nn.Linear(fused_dim + ts_dim, hidden_dim)
-        self.fc2 = nn.Linear(hidden_dim, 1)
+        self.lstm = nn.LSTM(fused_dim + ts_dim, hidden_dim, batch_first=True)
+        self.fc = nn.Linear(hidden_dim, 1)
 
     def forward(self, fused, ts):
-        fused_exp = fused.unsqueeze(1).expand(-1, ts.size(1), -1)
-        x = torch.cat([fused_exp, ts], dim=2)
-        x = F.relu(self.fc1(x))
-        return torch.sigmoid(self.fc2(x)).squeeze(-1), x
+        fused_exp = fused.unsqueeze(1).expand(-1, ts.size(1), -1)  # [B, T, fused_dim]
+        x = torch.cat([fused_exp, ts], dim=2)                      # [B, T, fused_dim + ts_dim]
+        x, _ = self.lstm(x)                                         # [B, T, hidden_dim]
+        out = self.fc(x)                                            # [B, T, 1]
+        return torch.sigmoid(out).squeeze(-1)  
 
 # === Full Model ===
 class PatientOutcomeModel(nn.Module):
@@ -91,7 +94,7 @@ class PatientOutcomeModel(nn.Module):
         self.flat_encoder = FlatFeatureEncoder(flat_input_dim, hidden_dim)
         self.graph_encoder = GraphEncoder(graph_input_dim, hidden_dim)
         self.ts_encoder = TimeSeriesEncoder(pretrained_encoder)
-        self.som_layer = SOMLayer(som) if som else None   # fine tune
+        self.som_layer = SOMLayer(som)   # fine tune
         self.fusion = FeatureAttentionFusion(hidden_dim, hidden_dim)
         self.risk_predictor = RiskPredictor(hidden_dim, hidden_dim, hidden_dim)
 
@@ -116,17 +119,10 @@ class PatientOutcomeModel(nn.Module):
         fused_static = self.fusion([flat_emb, graph_emb])  # [B, D]
 
         # === TS Embedding ===
-        ts_emb = self.ts_encoder(ts_data, lengths)
-        losses = {}
-        if self.som_layer:
-            ts_emb, losses = self.som_layer(ts_emb)
-            if "bmu_indices" in losses:
-                bmu_indices = losses["bmu_indices"]
-                k_x = bmu_indices // self.som_layer.som.grid_size[1]
-                k_y = bmu_indices % self.som_layer.som.grid_size[1]
-                k = torch.stack([k_x, k_y], dim=-1)
-                losses["k"] = k
-
+        ts_emb = self.ts_encoder(ts_data, lengths)  # [B, T, D]
+        
+        s = self.som_layer(ts_emb)
+            
         # === Risk Prediction ===
-        risk_scores, combined = self.risk_predictor(fused_static, ts_emb)
-        return risk_scores, combined, losses
+        risk_scores = self.risk_predictor(fused_static, ts_emb)  # [B, T]
+        return risk_scores, ts_emb,s

@@ -83,43 +83,42 @@ class CausalInformerBlock(nn.Module):
         x = self.norm1(x + self.attn(x))
         x = self.norm2(x + self.ffn(x))
         return x
-
+    
 class SOMLayer(nn.Module):
-    def __init__(self, grid_size, latent_dim, alpha=10.0, kappa=2.0, max_seq_len=3500, time_decay=0.9):
+    def __init__(self, grid_size, latent_dim, alpha=1.0, time_decay=0.9, max_seq_len=4000):
         super().__init__()
-        self.n_rows, self.n_cols = grid_size
-        self.M = self.n_rows * self.n_cols
+        self.grid_size = grid_size
         self.latent_dim = latent_dim
         self.alpha = alpha
-        self.kappa = kappa
         self.time_decay = time_decay
-        self.centroids = nn.Parameter(torch.randn(self.M, latent_dim))
+        self.nodes = nn.Parameter(torch.randn(grid_size[0], grid_size[1], latent_dim))
 
-        # register time-decay weights
         decay = [time_decay ** (max_seq_len - t - 1) for t in range(max_seq_len)]
-        time_weights = torch.tensor(decay).view(1, max_seq_len, 1)
-        self.register_buffer("time_weights", time_weights)
+        self.register_buffer("time_weights", torch.tensor(decay).view(1, max_seq_len, 1))
 
     def forward(self, z):
-        B, T, L = z.shape
+        batch_size, seq_len, _ = z.shape
+        weighted_z = z * self.time_weights[:, -seq_len:, :]
+        z_flat = rearrange(weighted_z, 'b t d -> (b t) d')
 
-        # Apply time decay
-        time_weights = self.time_weights[:, -T:, :]
-        weighted_z = z * time_weights  # [B, T, L]
-        z_flat = weighted_z.view(-1, L)
+        nodes_flat = self.nodes.view(-1, self.latent_dim)
+        dists = torch.norm(z_flat.unsqueeze(1) - nodes_flat.unsqueeze(0), p=2, dim=-1)
 
-        # Similarity to centroids
-        d2 = torch.sum((z_flat.unsqueeze(1) - self.centroids.unsqueeze(0))**2, dim=-1)
-        q = (1 + d2 / self.alpha).pow(-(self.alpha+1)/2)
-        q = q / (q.sum(dim=1, keepdim=True) + 1e-8)  # shape [B*T, M]
+        q = 1.0 / (1.0 + dists / self.alpha) ** ((self.alpha + 1) / 2)
+        q = F.normalize(q, p=1, dim=-1)
 
-        # Cluster assignment hardening
-        t = q ** self.kappa
-        t = t / (t.sum(dim=0, keepdim=True) + 1e-8)
+        _, bmu_indices = torch.min(dists, dim=-1)
+        bmu_indices = bmu_indices.view(batch_size, seq_len)
 
-        # reshape for output
-        s = q.view(B, T, self.M)
-        return s
+        som_z = z + 0.1 * (nodes_flat[bmu_indices.view(-1)].view_as(z) - z)
+
+        return som_z, {
+            'q': q,
+            'bmu_indices': bmu_indices,
+            'nodes': self.nodes,
+            'grid_size': self.grid_size,
+            'time_decay': self.time_decay
+        }
 
 
 class Encoder(nn.Module):
@@ -156,14 +155,20 @@ class Decoder(nn.Module):
         return self.out_proj(x_out)
 
 class PatientAutoencoder(nn.Module):
-    def __init__(self, n_features, embedding_dim, n_heads, som_grid=(10, 10)):
+    def __init__(self, n_features, embedding_dim, n_heads, som_grid=[10,10]):
         super().__init__()
         self.encoder = Encoder(n_features, embedding_dim, n_heads)
+        self.som = SOMLayer(som_grid, embedding_dim)
         self.decoder = Decoder(embedding_dim, n_features, n_heads)
-        self.som = SOMLayer(grid_size=som_grid, latent_dim=embedding_dim)
+        self.use_som = True
 
-    def forward(self, x, lengths):
-        z = self.encoder(x, lengths)
-        x_hat = self.decoder(z)
-        s = self.som(z)
-        return x_hat, z, s
+    def forward(self, x, seq_lengths):
+        z_e = self.encoder(x, seq_lengths)
+        if self.use_som:
+            som_z, aux_info = self.som(z_e)
+        else:
+            som_z, aux_info = z_e, {}
+
+        x_hat = self.decoder(som_z)
+
+        return x_hat, som_z, aux_info

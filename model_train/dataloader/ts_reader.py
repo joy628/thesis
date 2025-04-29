@@ -38,7 +38,7 @@ class MultiModalDataset(Dataset):
         
         ts_data = torch.tensor(ts_data, dtype=torch.float32)
         flat_data = torch.tensor(flat_data, dtype=torch.float32)
-        risk_data = torch.tensor(risk_data[:, -1], dtype=torch.float32)
+        risk_data = torch.tensor(risk_data[:, -1], dtype=torch.float32) # risk data is the last column
 
         
         return patient_id, flat_data,ts_data, risk_data, category

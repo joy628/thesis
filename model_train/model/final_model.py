@@ -97,6 +97,7 @@ class PatientOutcomeModel(nn.Module):
         self.som_layer = SOMLayer(som)   # fine tune
         self.fusion = FeatureAttentionFusion(hidden_dim, hidden_dim)
         self.risk_predictor = RiskPredictor(hidden_dim, hidden_dim, hidden_dim)
+        self.use_som_for_risk = True 
 
     def forward(self, flat_data, graph_data, patient_ids, ts_data, lengths):
         device = ts_data.device
@@ -120,9 +121,13 @@ class PatientOutcomeModel(nn.Module):
 
         # === TS Embedding ===
         ts_emb = self.ts_encoder(ts_data, lengths)  # [B, T, D]
+        som_z,aux_info = self.som_layer(ts_emb)
+        if self.use_som_for_risk:
+            ts = som_z
+        else:
+            ts= ts_emb
         
-        s = self.som_layer(ts_emb)
             
         # === Risk Prediction ===
-        risk_scores = self.risk_predictor(fused_static, ts_emb)  # [B, T]
-        return risk_scores, ts_emb,s
+        risk_scores = self.risk_predictor(fused_static, ts)  # [B, T]
+        return risk_scores,ts_emb,som_z,aux_info

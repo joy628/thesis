@@ -38,6 +38,38 @@ def compute_risk_loss(pred, target, lengths, categories=None, weight_per_categor
 
     return loss.mean(), category_losses, loss.detach()
 
+def compute_total_risk_som_loss(pred, target, lengths, categories, som_z, aux_info, som_weights):
+    risk_loss, category_losses, batch_loss = compute_risk_loss(pred, target, lengths, categories)
+
+    q = aux_info['q']
+    nodes = aux_info['nodes']
+    bmu_indices = aux_info['bmu_indices']
+    grid_size = aux_info['grid_size']
+    time_decay = aux_info['time_decay']
+
+    p = (q ** 2) / torch.sum(q ** 2, dim=0, keepdim=True)
+    p = F.normalize(p, p=1, dim=-1)
+    kl_loss = F.kl_div(q.log(), p.detach(), reduction='batchmean')
+
+    nodes_flat = nodes.view(-1, som_z.size(-1))
+    diversity_loss = -torch.mean(torch.norm(nodes_flat.unsqueeze(0) - nodes_flat.unsqueeze(1), dim=-1, p=2))
+
+    time_smooth_loss = F.mse_loss(som_z[:, 1:], som_z[:, :-1]) * time_decay
+    prev_coords = torch.stack([bmu_indices[:, :-1] // grid_size[1], bmu_indices[:, :-1] % grid_size[1]], dim=-1)
+    next_coords = torch.stack([bmu_indices[:, 1:] // grid_size[1], bmu_indices[:, 1:] % grid_size[1]], dim=-1)
+    neighbor_dists = torch.sum(torch.abs(prev_coords - next_coords), dim=-1)
+    neighbor_loss = neighbor_dists.float().mean()
+
+    total = (
+        risk_loss +
+        som_weights['kl'] * kl_loss +
+        som_weights['diversity'] * (-diversity_loss) +
+        som_weights['smooth'] * time_smooth_loss +
+        som_weights['neighbor'] * neighbor_loss
+    )
+
+    return total, category_losses,batch_loss
+
 
 # === Early Stopping Helper ===
 class EarlyStopping:
@@ -62,7 +94,7 @@ class EarlyStopping:
             model.load_state_dict(self.best_model)
 
 # === Training Loop ===
-def train_patient_outcome_model(model, train_loader, val_loader, graph_data, optimizer, device, n_epochs, save_path, history_path,patience):
+def train_patient_outcome_model(model, train_loader, val_loader, graph_data, optimizer, device, n_epochs, save_path, history_path,patience, use_som=False, som_weights=None):
     history = {'train': [], 'val': [], 'category': []}
     stopper = EarlyStopping(patience=patience)
 
@@ -74,9 +106,12 @@ def train_patient_outcome_model(model, train_loader, val_loader, graph_data, opt
             flat_data, ts_data, risk_data, lengths, risk_category = flat_data.to(device), ts_data.to(device), risk_data.to(device), lengths.to(device), risk_category.to(device)
 
             optimizer.zero_grad()
-            pred, _,_ = model(flat_data, graph_data, patient_ids, ts_data, lengths)
-            loss, _, batch_losses = compute_risk_loss(pred, risk_data, lengths, risk_category)
-          
+            pred, _, som_z, aux_info = model(flat_data, graph_data, patient_ids, ts_data, lengths)
+            if use_som:
+                loss, _ ,_= compute_total_risk_som_loss(pred, risk_data, lengths, risk_category, som_z, aux_info, som_weights)
+            else:
+                loss, _, _ = compute_risk_loss(pred, risk_data, lengths, risk_category)
+
             loss.backward()
             optimizer.step()
             torch.cuda.empty_cache() 
@@ -90,9 +125,15 @@ def train_patient_outcome_model(model, train_loader, val_loader, graph_data, opt
             for batch in val_loader:
                 patient_ids, flat_data, ts_data, risk_data, lengths, risk_category = batch
                 flat_data, ts_data, risk_data, lengths, risk_category = flat_data.to(device), ts_data.to(device), risk_data.to(device), lengths.to(device), risk_category.to(device)
-                pred, ts_emb,s = model(flat_data, graph_data, patient_ids, ts_data, lengths)
-                loss, _, batch_losses = compute_risk_loss(pred, risk_data, lengths, risk_category,weight_per_category={0: 1.0, 1: 1.0, 2: 1.0, 3: 3.0})
+                pred, ts_emb, som_z, aux_info = model(flat_data, graph_data, patient_ids, ts_data, lengths)
+                if use_som:
+                    loss, _, batch_losses = compute_total_risk_som_loss(pred, risk_data, lengths, risk_category, som_z, aux_info, som_weights)
+        
+                else:
+                    loss, _, batch_losses = compute_risk_loss(pred, risk_data, lengths, risk_category)
+
                 val_loss_total += loss.item()
+                # === Collect losses and categories ===
                 all_losses.extend(batch_losses.cpu().tolist())
                 all_categories.extend(risk_category.cpu().tolist())
 
@@ -131,7 +172,7 @@ def train_patient_outcome_model(model, train_loader, val_loader, graph_data, opt
     
 
    
-def evaluate_model_on_test_set(model, test_loader, graph_data, device, save_json_path=None):
+def evaluate_model_on_test_set(model, test_loader, graph_data, device, save_json_path=None, use_som=False, som_weights=None):
     model.eval()
     all_losses = []
     all_categories = []
@@ -143,8 +184,12 @@ def evaluate_model_on_test_set(model, test_loader, graph_data, device, save_json
             flat_data, ts_data, risk_data, lengths, risk_category = \
                 flat_data.to(device), ts_data.to(device), risk_data.to(device), lengths.to(device), risk_category.to(device)
 
-            pred, ts_emb, s = model(flat_data, graph_data, patient_ids, ts_data, lengths)
-            loss, _, batch_losses = compute_risk_loss(pred, risk_data, lengths, risk_category)
+            pred, ts_emb,som_z,aux_info = model(flat_data, graph_data, patient_ids, ts_data, lengths)
+            if use_som:
+                    loss, _, batch_losses = compute_total_risk_som_loss(pred, risk_data, lengths, risk_category, som_z, aux_info, som_weights)
+        
+            else:
+                    loss, _, batch_losses = compute_risk_loss(pred, risk_data, lengths, risk_category)
 
             test_loss_total += loss.item()
             all_losses.extend(batch_losses.cpu().tolist())

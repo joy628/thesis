@@ -46,11 +46,23 @@ class SOMLayer(nn.Module):
             'time_decay': self.time_decay
         }
         
+class RNNEncoder(nn.Module):
+    def __init__(self, input_dim, hidden_dim):
+        super().__init__()
+        self.rnn = nn.RNN(input_dim, hidden_dim, batch_first=True)
+
+    def forward(self, x, lengths):
+        # pack
+        packed = pack_padded_sequence(x, lengths.cpu(), batch_first=True, enforce_sorted=False)
+        packed_output, _ = self.rnn(packed)
+        # unpack
+        output, _ = pad_packed_sequence(packed_output, batch_first=True)
+        return output  # shape: [B, T, H]
         
 class BaselineRNN(nn.Module):
     def __init__(self, n_features, embedding_dim, grid_size=(10, 10)):
         super().__init__()
-        self.encoder_rnn = nn.RNN(n_features, embedding_dim, batch_first=True)
+        self.encoder = RNNEncoder(n_features, embedding_dim)
         self.decoder_rnn = nn.RNN(embedding_dim, embedding_dim, batch_first=True)
         self.som = SOMLayer(grid_size, latent_dim=embedding_dim, alpha=1.0, time_decay=0.9)
         self.use_som = False
@@ -62,10 +74,8 @@ class BaselineRNN(nn.Module):
         )
 
     def forward(self, x, lengths):
-        packed = pack_padded_sequence(x, lengths.cpu(), batch_first=True, enforce_sorted=False)
-        z_e, _ = self.encoder_rnn(packed)
-        z_e, _ = pad_packed_sequence(z_e, batch_first=True)
-
+        z_e = self.encoder(x, lengths)  
+        
         if self.use_som:
             som_z, aux_info = self.som(z_e)
         else:

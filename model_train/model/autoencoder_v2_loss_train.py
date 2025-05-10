@@ -1,260 +1,293 @@
-import torch.nn.functional as F
-import torch
 import copy
 import json
-import numpy as np
-import matplotlib.pyplot as plt
-import seaborn as sns
-import torch.optim as optim
 import os
+import torch
+import torch.nn.functional as F
+import matplotlib.pyplot as plt
 
+def freeze(module):
+    for p in module.parameters():
+        p.requires_grad = False
 
-def generate_mask(seq_len, actual_lens, device):
-    actual_lens = actual_lens.to(device)
-    arange_tensor = torch.arange(seq_len, device=device)
-    mask = arange_tensor.expand(len(actual_lens), seq_len) < actual_lens.unsqueeze(1)
-    return mask
+def unfreeze(module):
+    for p in module.parameters():
+        p.requires_grad = True
 
-# --- Loss Functions ---
-def reconstruction_loss(x_recon, x, mask):
-    loss = F.mse_loss(x_recon * mask.unsqueeze(-1), x * mask.unsqueeze(-1), reduction='sum')
-    return loss / (mask.sum() * x.size(-1) + 1e-8)
+def generate_mask(seq_len, lengths, device):
+    arange = torch.arange(seq_len, device=device).unsqueeze(0)
+    mask = arange < lengths.unsqueeze(1)
+    return mask.float()
 
-def kl_divergence(mu, logvar, mask):
-    # sum KL over dims and time
-    kld = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
-    return kld / (mask.sum() * mu.size(-1) + 1e-8)
+def save_model(model, path):
+    torch.save(model.state_dict(), path)
 
-def cluster_assignment_hardening_loss(s, kappa=2.0):
-    q = s.view(-1, s.size(-1))
-    t = q**kappa
-    t = t / (t.sum(dim=0, keepdim=True) + 1e-8)
-    loss = torch.mean(torch.sum(t * torch.log((t + 1e-8) / (q + 1e-8)), dim=-1))
-    return loss
-
-def ssom_loss(s, grid_size):
-    # encourage neighboring nodes to have similar assignment
-    B, T, M = s.shape
-    n_rows, n_cols = grid_size
-    loss = 0.0
-    # compute neighbor indices
-    for idx in range(M):
-        r, c = divmod(idx, n_cols)
-        neighbors = []
-        if r>0:    neighbors.append((r-1)*n_cols + c)
-        if r<n_rows-1: neighbors.append((r+1)*n_cols + c)
-        if c>0:    neighbors.append(r*n_cols + (c-1))
-        if c<n_cols-1: neighbors.append(r*n_cols + (c+1))
-        for nb in neighbors:
-            p_i = s[:,:,idx]
-            p_j = s[:,:,nb]
-            loss += - (p_i * torch.log(p_j + 1e-8)).sum() / (B*T)
-    return loss
-
-def temporal_smoothness_loss(z, mask):
-    diff = z[:,1:,:] - z[:,:-1,:]
-    valid = mask[:,1:] * mask[:,:-1]
-    loss = torch.sum((diff**2) * valid.unsqueeze(-1))
-    return loss / (valid.sum() * z.size(-1) + 1e-8)
-
-def prediction_loss(z_pred, z, mask):
-    pred = z_pred[:,:-1,:]
-    target = z[:,1:,:]
-    valid = mask[:,1:] * mask[:,:-1]
-    loss = torch.sum(((pred - target)**2) * valid.unsqueeze(-1))
-    return loss / (valid.sum() * z.size(-1) + 1e-8)
-
-# --- Combined Loss ---
-def compute_tdpsom_loss(x_recon, x, mu, logvar, z, s, z_pred, lengths,
-                        grid_size, weights):
-    mask = generate_mask(x.size(1), lengths, x.device)
-    lr = weights
-    l_recon = reconstruction_loss(x_recon, x, mask)
-    l_kl    = kl_divergence(mu, logvar, mask)
-    l_cah   = cluster_assignment_hardening_loss(s, kappa=lr['cluster_k'])
-    l_ssom  = ssom_loss(s, grid_size)
-    l_smooth= temporal_smoothness_loss(z, mask)
-    l_pred  = prediction_loss(z_pred, z, mask)
-    total = (lr['recon'] * l_recon + lr['kl'] * l_kl + lr['cluster'] * l_cah
-           + lr['ssom'] * l_ssom + lr['smooth'] * l_smooth + lr['pred'] * l_pred)
-    return total, {
-        'recon': l_recon.item(), 'kl': l_kl.item(), 'cah': l_cah.item(),
-        'ssom': l_ssom.item(), 'smooth': l_smooth.item(), 'pred': l_pred.item()
-    }
-    
-    
-
-def train_vae_pretrain(model, loader, optimizer, device,
-                       checkpoint_dir, epochs=50, prior_max=1e-5, anneal_steps=200):
-    """
-    stage1: train VAEEncoder + Decoder
-    """
-    os.makedirs(checkpoint_dir, exist_ok=True)
-    history = []
-    model.train()
-    for ep in range(epochs):
-        prior = min(prior_max, (ep/anneal_steps)*prior_max)
-        total_loss = 0.0
-        for x, lengths in loader:
+def evaluate_val_loss(model, val_loader, device):
+    model.eval()
+    total = 0.0
+    with torch.no_grad():
+        for x, lengths in val_loader:
             x, lengths = x.to(device), lengths.to(device)
+            x_hat, _, _ = model(x, lengths)
+            mask = generate_mask(x.shape[1], lengths, device).unsqueeze(-1)
+            loss = F.mse_loss(x_hat * mask, x * mask)
+            total += loss.item()
+    return total / len(val_loader)
+
+
+def compute_som_loss(som_z, aux_info, epoch=None,lambda_cfg=None ):
+    lambda_cfg = lambda_cfg or {
+        'diversity': 0.3,
+        'entropy': 0.3,
+        'smooth': 0.5,
+        'neighbor': 0.2,
+        'usage': 0.1
+    }
+
+    bmu_indices = aux_info["bmu_indices"]
+    nodes = aux_info["nodes"].to(som_z.device) 
+    q = aux_info["q"]
+    grid_size = aux_info["grid_size"]
+    time_decay = aux_info["time_decay"]
+
+    B, T, D = som_z.shape
+    H, W = grid_size
+    N = H * W
+
+    nodes_flat = nodes.view(-1, D)
+    bmu_flat = bmu_indices.view(-1)
+
+    diversity_loss = -torch.mean(torch.norm(
+        nodes_flat.unsqueeze(0) - nodes_flat.unsqueeze(1), dim=-1
+    ))
+
+    usage = torch.bincount(bmu_flat, minlength=N).float().to(som_z.device) + 1e-6
+    usage = usage / usage.sum()
+    entropy_loss = -torch.sum(usage * torch.log(usage))
+
+    # === Dynamic threshold for usage ===
+    if epoch is not None and epoch < 10:
+        min_usage = 0.005
+    else:
+        min_usage = 0.01
+    usage_loss = F.relu(min_usage - usage).mean()
+
+    time_smooth_loss = F.mse_loss(som_z[:, 1:], som_z[:, :-1]) * time_decay
+
+    prev = torch.stack([bmu_indices[:, :-1] // W, bmu_indices[:, :-1] % W], dim=-1)
+    next = torch.stack([bmu_indices[:, 1:] // W, bmu_indices[:, 1:] % W], dim=-1)
+    neighbor_loss = torch.abs(prev - next).sum(dim=-1).float().mean()
+
+    total = (
+        lambda_cfg['diversity'] * (-diversity_loss) +
+        lambda_cfg['entropy'] * entropy_loss +
+        lambda_cfg['smooth'] * time_smooth_loss +
+        lambda_cfg['neighbor'] * neighbor_loss +
+        lambda_cfg.get('usage', 0.1) * usage_loss
+    )
+
+    return total
+
+def compute_reconstruction_loss(x_hat, x, lengths):
+    mask = generate_mask(x.size(1), lengths, x.device).unsqueeze(-1)
+    return F.mse_loss(x_hat * mask, x * mask)
+
+
+# Phase 1
+
+def train_phase1_som_only(model, train_loader, val_loader, device, optimizer,
+                          epochs=20, alpha_weights=None, patience=20, save_path=None):
+    alpha_weights = alpha_weights or {'entropy': 0.3, 'diversity': 0.3, 'smooth': 0.5, 'neighbor': 0.2}
+    freeze(model.encoder)
+    freeze(model.decoder)
+    if hasattr(model, 'som_classifier'):
+        freeze(model.som_classifier)
+    model.use_som = True
+
+    best_loss = float('inf')
+    best_model = copy.deepcopy(model.state_dict())
+    history = {'train_loss': [], 'val_loss': []}
+    no_improve_epochs = 0
+
+    if save_path is None:
+        save_path = "./phase1_outputs"
+    os.makedirs(save_path, exist_ok=True)
+
+    for epoch in range(epochs):
+        val_total_loss = 0
+        total_loss = 0
+        model.train()
+
+        for x, lengths in train_loader:
+            x, lengths = x.to(device), lengths.to(device)
+            with torch.no_grad():
+                z_e = model.encoder(x, lengths)
+
+            som_z, aux = model.som(z_e)
+            loss = compute_som_loss(som_z, aux,  epoch)
+
             optimizer.zero_grad()
-            x_recon, mu, logvar, z, s, z_pred = model(x, lengths)
-            mask = generate_mask(x.size(1), lengths, device)
-            l_recon = reconstruction_loss(x_recon, x, mask)
-            l_kl    = kl_divergence(mu, logvar, mask)
-            loss = l_recon + prior * l_kl
             loss.backward()
             optimizer.step()
             total_loss += loss.item()
-        avg = total_loss / len(loader)
-        history.append(avg)
 
-        if (ep+1) % 10 == 0 or (ep+1) == epochs:
-            print(f"[VAE Pretrain] ep {ep+1}/{epochs}  loss={avg:.4f}")
-            ckpt = os.path.join(checkpoint_dir, f"pretrain_epoch{ep+1:03d}.pth")
-            torch.save(model.state_dict(), ckpt)
-            print(f"  ➡ saved {ckpt}")
+        train_loss = total_loss / len(train_loader)
+        
+        # === Validation ===
+        model.eval()
+        with torch.no_grad():
+            for x_val, lengths_val in val_loader:
+                x_val, lengths_val = x_val.to(device), lengths_val.to(device)
+                z_val = model.encoder(x_val, lengths_val)
+                _, aux_val = model.som(z_val)
+                val_loss = compute_som_loss(z_val, aux_val, epoch)
+                val_total_loss += val_loss.item()
+        val_loss = val_total_loss / len(val_loader)
+        history['val_loss'].append(val_loss)
+        history['train_loss'].append(train_loss)
 
-    return history
+        if epoch % 10 == 0 or epoch == epochs - 1:
+            print(f"[Phase1][Epoch {epoch}] train: {train_loss:.4f}, val: {val_loss:.4f}")
 
+        if val_loss < best_loss:
+            best_loss = train_loss
+            best_model = copy.deepcopy(model.state_dict())
+            no_improve_epochs = 0
+            save_model(model, os.path.join(save_path, 'best_model_som.pth'))
+        else:
+            no_improve_epochs += 1
 
-def init_som_centroids(model, loader, device, checkpoint_dir,
-                       epochs_per_stage=17, lrs=(0.1,0.01,0.001), grid_size=(10,10)):
-    """
-    stage2: freeze encoder/decoder, train PSOM centroids only
-    """
-    os.makedirs(checkpoint_dir, exist_ok=True)
-    history = []
-    # 冻结所有参数，除了 centroids
-    for name, p in model.named_parameters():
-        p.requires_grad = ('psom.centroids' in name)
+        if no_improve_epochs >= patience:
+            print(" Early stopping triggered.")
+            break
 
-    for lr in lrs:
-        optim_c = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=lr)
-        for ep in range(epochs_per_stage):
-            total = 0.0
-            for x, lengths in loader:
-                x, lengths = x.to(device), lengths.to(device)
-                optim_c.zero_grad()
-                with torch.no_grad():
-                    z, _, _ = model.encoder(x, lengths)
-                s = model.psom(z)
-                loss = ssom_loss(s, grid_size)
-                loss.backward()
-                optim_c.step()
-                total += loss.item()
+        with open(os.path.join(save_path, 'history_som.json'), 'w') as f:
+            json.dump(history, f, indent=2)
 
-            avg = total / len(loader)
-            history.append(avg)
-
-            if (ep+1) % 5 == 0 or (ep+1) == epochs_per_stage:
-                print(f"[SOM Init lr={lr:.2e}] ep {ep+1}/{epochs_per_stage}  loss={avg:.4f}")
-                ckpt = os.path.join(checkpoint_dir,
-                                    f"som_init_lr{lr:.2e}_ep{ep+1:02d}.pth")
-                torch.save(model.state_dict(), ckpt)
-                print(f"  ➡ saved {ckpt}")
-
-    return history
+    model.load_state_dict(best_model)
+    return model, history
 
 
-def joint_train(model, train_loader, val_loader, device,
-                checkpoint_dir, epochs=100, base_lr=1e-3, decay=0.99,
-                weights=None, grid_size=(10,10)):
-    """
-    stage3: joint train + every 10 epoch save checkpoint
-    """
-    os.makedirs(checkpoint_dir, exist_ok=True)
-    for p in model.parameters(): p.requires_grad = True
-    optimizer = optim.Adam(model.parameters(), lr=base_lr)
-    history = {"train": [], "val": []}
 
-    for ep in range(epochs):
-        # adjust lr
-        lr = base_lr * (decay**ep)
-        for g in optimizer.param_groups:
-            g['lr'] = lr
+# Phase 2
 
-        # --- train ---
+def train_phase2_som_decoder_with_val(model, train_loader, val_loader, device, optimizer,
+                                      epochs=20, alpha_weights=None, patience=20, save_path=None):
+    alpha_weights = alpha_weights or {'recon': 1.0, 'entropy': 0.3, 'diversity': 0.3, 'smooth': 0.5, 'neighbor': 0.2}
+    freeze(model.encoder)
+    unfreeze(model.decoder)
+    if hasattr(model, 'som_classifier'):
+        freeze(model.som_classifier)
+    model.use_som = True
+
+    best_loss = float('inf')
+    best_model = copy.deepcopy(model.state_dict())
+    history = {'train_loss': [], 'val_loss': []}
+    no_improve_epochs = 0
+
+    for epoch in range(epochs):
+        total_loss = 0
         model.train()
-        tot_train = 0.0
+
         for x, lengths in train_loader:
             x, lengths = x.to(device), lengths.to(device)
-            optimizer.zero_grad()
-            x_recon, mu, logvar, z, s, z_pred = model(x, lengths)
-            loss, _ = compute_tdpsom_loss(
-                x_recon, x, mu, logvar, z, s, z_pred,
-                lengths, grid_size, weights
-            )
-            loss.backward()
-            optimizer.step()
-            tot_train += loss.item()
-        avg_train = tot_train / len(train_loader)
-        history["train"].append(avg_train)
-
-        # --- val ---
-        model.eval()
-        tot_val = 0.0
-        with torch.no_grad():
-            for x, lengths in val_loader:
-                x, lengths = x.to(device), lengths.to(device)
-                x_recon, mu, logvar, z, s, z_pred = model(x, lengths)
-                loss, _ = compute_tdpsom_loss(
-                    x_recon, x, mu, logvar, z, s, z_pred,
-                    lengths, grid_size, weights
-                )
-                tot_val += loss.item()
-        avg_val = tot_val / len(val_loader)
-        history["val"].append(avg_val)
-
-        if (ep+1) % 10 == 0 or (ep+1) == epochs:
-            print(f"[Joint] Epoch {ep+1}/{epochs}  train={avg_train:.4f}  val={avg_val:.4f}")
-            ckpt = os.path.join(checkpoint_dir, f"joint_epoch{ep+1:03d}.pth")
-            torch.save(model.state_dict(), ckpt)
-            print(f"  ➡ saved {ckpt}")
-
-    return history
-
-
-def predict_finetune(model, loader, device, checkpoint_dir, epochs=50):
-    """
-    stage4: train prediction branch only + save every 10 epochs
-    """
-    os.makedirs(checkpoint_dir, exist_ok=True)
-    history = []
-    # 冻结除 predict 分支外所有参数
-    for name, p in model.named_parameters():
-        p.requires_grad = ('predict' in name)
-    optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=1e-3)
-
-    for ep in range(epochs):
-        model.train()
-        tot = 0.0
-        for x, lengths in loader:
-            x, lengths = x.to(device), lengths.to(device)
-            optimizer.zero_grad()
             with torch.no_grad():
-                z, _, _ = model.encoder(x, lengths)
-            z_pred = model.predict(z, lengths)
-            mask = generate_mask(x.size(1), lengths, device)
-            loss = prediction_loss(z_pred, z, mask)
+                z_e = model.encoder(x, lengths)
+
+            som_z, aux = model.som(z_e)
+            x_hat = model.decoder(som_z)
+            recon = compute_reconstruction_loss(x_hat, x, lengths)
+            som_loss  = compute_som_loss(som_z, aux, epoch)
+            loss = alpha_weights['recon'] * recon + som_loss
+
+            optimizer.zero_grad()
             loss.backward()
             optimizer.step()
-            tot += loss.item()
+            total_loss += loss.item()
 
-        avg = tot / len(loader)
-        history.append(avg)
+        train_loss = total_loss / len(train_loader)
+        val_loss = evaluate_val_loss(model, val_loader, device)
 
-        if (ep+1) % 10 == 0 or (ep+1) == epochs:
-            print(f"[Pred Finetune] ep {ep+1}/{epochs}  loss={avg:.4f}")
-            ckpt = os.path.join(checkpoint_dir, f"predfinetune_epoch{ep+1:03d}.pth")
-            torch.save(model.state_dict(), ckpt)
-            print(f"  ➡ saved {ckpt}")
+        history['train_loss'].append(train_loss)
+        history['val_loss'].append(val_loss)
+        if epoch % 10 == 0 or epoch == epochs - 1:
+           print(f"[Phase2][Epoch {epoch}] train: {train_loss:.4f}, val: {val_loss:.4f}")
 
-    return history
+        if val_loss < best_loss:
+            best_loss = val_loss
+            best_model = copy.deepcopy(model.state_dict())
+            no_improve_epochs = 0
+            save_model(model, os.path.join(save_path, 'best_model_som_decoder.pth'))
+        else:
+            no_improve_epochs += 1
 
-        
-        
-        
+        if no_improve_epochs >= patience:
+            print(" Early stopping triggered.")
+            break
+
+        with open(os.path.join(save_path, 'history_som_decoder.json'), 'w') as f:
+            json.dump(history, f, indent=2)
+
+    model.load_state_dict(best_model)
+    return model, history
+
+
+# Phase 3
+
+def train_phase3_joint_no_classifier_with_val(model, train_loader, val_loader, device, optimizer,
+                                              epochs=40, alpha_weights=None, patience=20, save_path=None):
+    alpha_weights = alpha_weights or {'recon': 1.0, 'entropy': 0.3, 'diversity': 0.3, 'smooth': 0.5, 'neighbor': 0.2}
+    unfreeze(model.encoder)
+    unfreeze(model.decoder)
+    model.use_som = True
+
+    best_loss = float('inf')
+    best_model = copy.deepcopy(model.state_dict())
+    history = {'train_loss': [], 'val_loss': []}
+    no_improve_epochs = 0
+
+    for epoch in range(epochs):
+        total_loss = 0
+        model.train()
+
+        for x, lengths in train_loader:
+            x, lengths = x.to(device), lengths.to(device)
+
+            x_hat, som_z, aux = model(x, lengths)
+            recon = compute_reconstruction_loss(x_hat, x, lengths)
+            som_loss  = compute_som_loss(som_z, aux, epoch)
+            loss = alpha_weights['recon'] * recon + som_loss
+
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            total_loss += loss.item()
+
+        train_loss = total_loss / len(train_loader)
+        val_loss = evaluate_val_loss(model, val_loader, device)
+
+        history['train_loss'].append(train_loss)
+        history['val_loss'].append(val_loss)
+        if epoch % 10 == 0 or epoch == epochs - 1:
+           print(f"[Phase3][Epoch {epoch}] train: {train_loss:.4f}, val: {val_loss:.4f}")
+
+        if val_loss < best_loss:
+            best_loss = val_loss
+            best_model = copy.deepcopy(model.state_dict())
+            no_improve_epochs = 0
+            save_model(model, os.path.join(save_path, 'best_model.pth'))
+        else:
+            no_improve_epochs += 1
+
+        if no_improve_epochs >= patience:
+            print(" Early stopping triggered.")
+            break
+
+        with open(os.path.join(save_path, 'history.json'), 'w') as f:
+            json.dump(history, f, indent=2)
+
+    model.load_state_dict(best_model)
+    return model, history
+
 
 def visualize_recons(model, data_loader, num_patients, feature_indices, feature_names,device):
     """
@@ -272,7 +305,7 @@ def visualize_recons(model, data_loader, num_patients, feature_indices, feature_
         inputs, lengths = next(iter(data_loader))  
         inputs = inputs.to(device)
         lengths = lengths.to(device)
-        x_recon, mu, logvar, z, s, z_pred = model(inputs, lengths)
+        x_recon, _,_ = model(inputs, lengths)
         outputs = x_recon
         outputs = outputs.cpu()
 
@@ -294,41 +327,11 @@ def visualize_recons(model, data_loader, num_patients, feature_indices, feature_
             ax.plot(range(effective_length), output_seq, label="Reconstructed", alpha=0.7, color="red")
             
             if i == 0:
-                ax.set_title(feature_names[feature_idx], fontsize=12)  # 使用 feature_names[feature_idx] 作为标题
+                ax.set_title(feature_names[feature_idx], fontsize=12)  # use feature_names[feature_idx] as title
             if j == 0:
                 ax.set_ylabel(f"Patient {i+1}", fontsize=12)
             ax.legend(fontsize=8, loc="upper right")
             
     plt.xlabel("Time Step")
-    plt.tight_layout()
-    plt.show()
-    
-    
-def plot_history(history):
-    epochs = range(1, len(history['train']) + 1)
-
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-
-    ax = axes[0]
-    ax.plot(epochs, history['train'], label='Train Loss', linewidth=2)
-    ax.plot(epochs, history['val'],   label='Val   Loss', linewidth=2)
-    ax.set_xlabel('Epoch')
-    ax.set_ylabel('Loss')
-    ax.set_title('Total Loss (Train vs Val)')
-    ax.legend()
-    ax.grid(True)
-
-    ax = axes[1]
-    comps = ['recon', 'kl', 'cah', 'ssom', 'smooth', 'pred']
-    for comp in comps:
-        ax.plot(epochs, history[f'{comp}'], 
-                label=f'{comp}', linestyle='-')
-
-    ax.set_xlabel('Epoch')
-    ax.set_ylabel('Loss')
-    ax.set_title('Component Losses')
-    ax.legend(ncol=2, fontsize='small')
-    ax.grid(True)
-
     plt.tight_layout()
     plt.show()

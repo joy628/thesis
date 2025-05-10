@@ -13,62 +13,104 @@ from tqdm import tqdm
 
 
 # === Risk Loss ===
-def compute_risk_loss(pred, target, lengths, categories=None, weight_per_category={0: 1.0, 1: 1.0, 2: 1.0, 3: 3.0}):
-    mask = generate_mask(pred.size(1), lengths, pred.device)
-    loss = F.mse_loss(pred, target, reduction='none')  # [B, T]
-    
-    # average loss over each patient
-    loss = (loss * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1)  # [B] the loss is now per patient
+def compute_risk_loss(pred, target, lengths, categories, weight_per_category={0: 1.0, 1: 1.0, 2: 2.0, 3: 5.0}, bce_ratio=0.5):
+    """
+    Args:
+        pred: [B, T] - predicted risk score (float in [0,1])
+        target: [B, T] - target risk score (float or binary)
+        lengths: [B] - actual sequence lengths
+        categories: [B] or [B, T] - risk class (0~3)
+        weight_per_category: dict - e.g. {0:1.0, 1:1.0, 2:2.0, 3:5.0}
+        bce_ratio: float - weighting between BCE and MSE (0.0~1.0)
+    Returns:
+        total_loss, category_avg_losses (dict), per_sample_loss [B]
+    """
+    B, T = pred.shape
+    device = pred.device
+    mask = generate_mask(T, lengths, device=device).float()  # [B, T]
 
-    # === weight ===
-    if categories is not None and weight_per_category is not None:
-        weights = torch.tensor(
-            [weight_per_category.get(int(c), 1.0) for c in categories],
-            device=loss.device
-        )  # [B]
-        loss = loss * weights  # [1.0, 1.0, 1.0, 1.0] for all patients
+    if categories.dim() == 1:
+        categories = categories.unsqueeze(1).expand(-1, T)  # [B, T]
 
+    weights = torch.ones_like(pred).to(device)
+    for cls, w in weight_per_category.items():
+        weights[categories == cls] = w
+
+    # === BCE Loss ===
+    bce = F.binary_cross_entropy(pred, (target > 0.5).float(), reduction='none')  # binarize if needed
+    bce_loss = (bce * weights * mask).sum() / (mask.sum() + 1e-8)
+
+    # === MSE Loss ===
+    mse = F.mse_loss(pred, target, reduction='none')
+    mse_loss = (mse * weights * mask).sum() / (mask.sum() + 1e-8)
+
+    # === Combine
+    total_loss = bce_ratio * bce_loss +  mse_loss
+
+    # === Per-patient loss
+    per_patient_loss = ((bce + mse) * mask).sum(dim=1) / (mask.sum(dim=1).clamp(min=1))  # [B]
+
+    # === Category-wise average loss
     category_losses = {}
-    if categories is not None:
-        for i in range(4):  # 4 categories
-            cat_loss = loss[categories == i]
-            if len(cat_loss) > 0:
-                avg = cat_loss.mean().item()
-                category_losses[i] = (avg, len(cat_loss))
+    cat_vec = categories[:, 0]  # [B]
+    for i in range(4):
+        losses = per_patient_loss[cat_vec == i]
+        if losses.numel() > 0:
+            category_losses[i] = (losses.mean().item(), losses.numel())
 
-    return loss.mean(), category_losses, loss.detach()
+    return total_loss, category_losses, per_patient_loss.detach()
 
 def compute_total_risk_som_loss(pred, target, lengths, categories, som_z, aux_info, som_weights):
+    # === 1. calculate risk loss（BCE + optional MSE）
     risk_loss, category_losses, batch_loss = compute_risk_loss(pred, target, lengths, categories)
 
+    # === 2. take out aux_info ===
     q = aux_info['q']
     nodes = aux_info['nodes']
     bmu_indices = aux_info['bmu_indices']
     grid_size = aux_info['grid_size']
     time_decay = aux_info['time_decay']
+    logits = aux_info['logits']  # [B*T, 4]
 
+    # === 3. KL Loss
     p = (q ** 2) / torch.sum(q ** 2, dim=0, keepdim=True)
     p = F.normalize(p, p=1, dim=-1)
     kl_loss = F.kl_div(q.log(), p.detach(), reduction='batchmean')
 
+    # === 4. Diversity Loss
     nodes_flat = nodes.view(-1, som_z.size(-1))
-    diversity_loss = -torch.mean(torch.norm(nodes_flat.unsqueeze(0) - nodes_flat.unsqueeze(1), dim=-1, p=2))
+    diversity_loss = -torch.mean(torch.norm(nodes_flat.unsqueeze(0) - nodes_flat.unsqueeze(1), dim=-1))
 
+    # === 5. Smoothness + Neighborhood
     time_smooth_loss = F.mse_loss(som_z[:, 1:], som_z[:, :-1]) * time_decay
     prev_coords = torch.stack([bmu_indices[:, :-1] // grid_size[1], bmu_indices[:, :-1] % grid_size[1]], dim=-1)
     next_coords = torch.stack([bmu_indices[:, 1:] // grid_size[1], bmu_indices[:, 1:] % grid_size[1]], dim=-1)
     neighbor_dists = torch.sum(torch.abs(prev_coords - next_coords), dim=-1)
     neighbor_loss = neighbor_dists.float().mean()
 
+    # === 6. SOM Risk Classification Loss
+    B, T = pred.shape
+    mask = generate_mask(T, lengths, pred.device)  # [B, T]
+    if categories.dim() == 1:
+        categories = categories.unsqueeze(1).expand(-1, T)
+
+    labels_flat = categories.view(-1)       # [B*T]
+    mask_flat = mask.view(-1)               # [B*T]
+    logits = logits[mask_flat]
+    labels_flat = labels_flat[mask_flat]
+    risk_cls_loss = F.cross_entropy(logits, labels_flat)
+
+    # === 7. Total loss
     total = (
         risk_loss +
         som_weights['kl'] * kl_loss +
         som_weights['diversity'] * (-diversity_loss) +
         som_weights['smooth'] * time_smooth_loss +
-        som_weights['neighbor'] * neighbor_loss
+        som_weights['neighbor'] * neighbor_loss +
+        som_weights['risk_cls'] * risk_cls_loss
     )
 
-    return total, category_losses,batch_loss
+    return total, category_losses, batch_loss
 
 
 # === Early Stopping Helper ===
@@ -244,7 +286,7 @@ def plot_training_history(history):
 def plot_patient_risk_trajectory(model, dataset, patient_index, graph_data, device):
     model.eval()
 
-    RISK_LABELS = ["Risk-Free", "Low Risk", "Medium Risk", "High Risk"]
+    RISK_LABELS = ["Risk-Free", "Low Risk", "High Risk", "Death"]
 
     if isinstance(dataset, torch.utils.data.DataLoader):
         dataset = dataset.dataset
@@ -256,7 +298,7 @@ def plot_patient_risk_trajectory(model, dataset, patient_index, graph_data, devi
     patient_ids = [pid]
 
     with torch.no_grad():
-        pred, _, _ = model(flat, graph_data, patient_ids, ts, lengths)
+        pred, _,_,_ = model(flat, graph_data, patient_ids, ts, lengths)
         pred = pred[0, :lengths.item()].cpu().numpy()
         true = risk[:lengths.item()].numpy()
 

@@ -86,6 +86,16 @@ class RiskPredictor(nn.Module):
         x, _ = self.lstm(x)                                         # [B, T, hidden_dim]
         out = self.fc(x)                                            # [B, T, 1]
         return torch.sigmoid(out).squeeze(-1)  
+    
+#  === SOM Risk Classifier ===
+class SOMRiskClassifier(nn.Module):
+    def __init__(self, som_grid_size, num_classes):
+        super().__init__()
+        self.num_nodes = som_grid_size[0] * som_grid_size[1]
+        self.fc = nn.Linear(self.num_nodes, num_classes)
+
+    def forward(self, q):  # q: [B*T, num_nodes]
+        return self.fc(q)  # logits: [B*T, num_classes]
 
 # === Full Model ===
 class PatientOutcomeModel(nn.Module):
@@ -97,7 +107,9 @@ class PatientOutcomeModel(nn.Module):
         self.som_layer = SOMLayer(som)   # fine tune
         self.fusion = FeatureAttentionFusion(hidden_dim, hidden_dim)
         self.risk_predictor = RiskPredictor(hidden_dim, hidden_dim, hidden_dim)
+        self.som_classifier = SOMRiskClassifier(som.grid_size, num_classes=4)
         self.use_som_for_risk = True 
+        
 
     def forward(self, flat_data, graph_data, patient_ids, ts_data, lengths):
         device = ts_data.device
@@ -126,8 +138,10 @@ class PatientOutcomeModel(nn.Module):
             ts = som_z
         else:
             ts= ts_emb
-        
-            
+        # === SOM Risk Classification ===
+        q = aux_info['q']  # [B*T, N]
+        logits = self.som_classifier(q) 
+        aux_info['logits'] = logits
         # === Risk Prediction ===
         risk_scores = self.risk_predictor(fused_static, ts)  # [B, T]
         return risk_scores,ts_emb,som_z,aux_info

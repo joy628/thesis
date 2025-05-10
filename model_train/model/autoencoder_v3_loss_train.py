@@ -193,7 +193,7 @@ def train_joint(model, train_loader, val_loader, device, optimizer, start,epochs
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
             best_model_wts = copy.deepcopy(model.state_dict())
-            torch.save(best_model_wts, os.path.join(save_dir, 'best_joint_model.pth'))
+            torch.save(best_model_wts, os.path.join(save_dir, 'best_joint_model_v2.pth'))
             no_improve_epochs = 0
         else:
             no_improve_epochs += 1

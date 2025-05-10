@@ -4,6 +4,7 @@ import torch.nn.functional as F
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 from einops import rearrange
 import math
+from sklearn.cluster import KMeans
 
 class DepthwiseCausalConv(nn.Module):
     def __init__(self, in_channels, kernel_size):
@@ -83,97 +84,151 @@ class CausalInformerBlock(nn.Module):
         x = self.norm1(x + self.attn(x))
         x = self.norm2(x + self.ffn(x))
         return x
-
-
-class VAEEncoder(nn.Module):
-    def __init__(self, n_features, hidden_dim, latent_dim, n_heads):
-        super().__init__()
-        self.cnn = DepthwiseCausalConv(n_features, kernel_size=3)
-        self.lstm = nn.LSTM(n_features, hidden_dim, batch_first=True)
-        self.informer = CausalInformerBlock(hidden_dim, n_heads, dropout=0.1)
-        self.fc_mu = nn.Linear(hidden_dim, latent_dim)
-        self.fc_logvar = nn.Linear(hidden_dim, latent_dim)
-
-    def forward(self, x, lengths):
-        # x: [B, T, D]
-        x = self.cnn(x)
-        packed = pack_padded_sequence(x, lengths.cpu(), batch_first=True, enforce_sorted=False)
-        h, _ = self.lstm(packed)
-        h, _ = pad_packed_sequence(h, batch_first=True)    # h: [B, T, hidden_dim]
-        h = self.informer(h)                               # [B, T, hidden_dim]
-        mu = self.fc_mu(h)                                 # [B, T, latent_dim]
-        logvar = self.fc_logvar(h)                         # [B, T, latent_dim]
-        std = (0.5 * logvar).exp()
-        eps = torch.randn_like(std)
-        z = mu + eps * std
-        return z, mu, logvar
     
-class PSOMClustering(nn.Module):
-    def __init__(self, grid_size, latent_dim, alpha=10.0, kappa=2.0):
+class SOMLayer(nn.Module):
+    def __init__(self, grid_size, latent_dim, alpha=1.0, time_decay=0.9, max_seq_len=4000,
+                 sample_embeddings=None):
+        """
+        Args:
+            grid_size (tuple): SOM 网格的尺寸，例如 (10, 10)
+            latent_dim (int): 潜在空间的维度
+            alpha (float): 距离计算的参数
+            time_decay (float): 时间衰减因子
+            max_seq_len (int): 最大序列长度
+            sample_embeddings (Tensor, optional): 用于 KMeans 初始化的样本嵌入，形状为 [N, latent_dim]
+        """
         super().__init__()
-        self.n_rows, self.n_cols = grid_size
-        self.M = self.n_rows * self.n_cols
+        self.grid_size = grid_size
         self.latent_dim = latent_dim
         self.alpha = alpha
-        self.kappa = kappa
-        # centroids: shape (M, latent_dim)
-        self.centroids = nn.Parameter(torch.randn(self.M, latent_dim))
+        self.time_decay = time_decay
+        self.kmeans_initialized = False
+
+        n_nodes = grid_size[0] * grid_size[1]
+
+        # 初始化 SOM 节点
+        if sample_embeddings is not None:
+
+            self.nodes = self._init_kmeans(sample_embeddings)
+            self.kmeans_initialized = True
+        else:
+            nodes = torch.empty(n_nodes, latent_dim)
+            nn.init.xavier_uniform_(nodes)
+            self.nodes = nn.Parameter(nodes)
+
+        # 时间衰减权重
+        decay = [time_decay ** (max_seq_len - t - 1) for t in range(max_seq_len)]
+        self.register_buffer("time_weights", torch.tensor(decay).view(1, max_seq_len, 1))
+
+    def _init_kmeans(self, samples):
+        """
+        使用 KMeans 初始化 SOM 节点。
+        """
+        n_nodes = self.grid_size[0] * self.grid_size[1]
+        samples_np = samples.detach().cpu().numpy()
+        kmeans = KMeans(n_clusters=n_nodes, init='k-means++', n_init=10, random_state=0)
+        kmeans.fit(samples_np)
+        centers = torch.tensor(kmeans.cluster_centers_, dtype=torch.float32)
+        return nn.Parameter(centers)
 
     def forward(self, z):
-        # z: [B, T, L]
-        B, T, L = z.shape
-        # flatten
-        z_flat = z.view(-1, L)            # [B*T, L]
-        # compute Student's t similarity
-        d2 = torch.sum((z_flat.unsqueeze(1) - self.centroids.unsqueeze(0))**2, dim=-1)
-        q = (1 + d2 / self.alpha).pow(-(self.alpha+1)/2)
-        q = q / (q.sum(dim=1, keepdim=True) + 1e-8)    # [B*T, M]
-        # cluster assignment hardening
-        t = q**self.kappa
-        t = t / (t.sum(dim=0, keepdim=True) + 1e-8)
-        # reshape for S-SOM: calculate neighborhood loss externally in loss function
-        s = q.view(B, T, self.M)
-        return s
+        """
+        前向传播。
+        Args:
+            z (Tensor): 输入张量，形状为 [batch_size, seq_len, latent_dim]
+        Returns:
+            som_z (Tensor): SOM 编码后的张量，形状与 z 相同
+            aux (dict): 辅助信息，包括 q 值、BMU 索引、节点等
+        """
+        batch_size, seq_len, _ = z.shape
 
-class ZPredictor(nn.Module):
-    def __init__(self, latent_dim, lstm_hidden_dim):
+        # 如果未初始化且处于训练模式，使用当前批次数据进行 KMeans 初始化
+        if not self.kmeans_initialized and self.training:
+
+            z_flat = z.detach().reshape(-1, self.latent_dim)
+            self.nodes = self._init_kmeans(z_flat)
+            self.kmeans_initialized = True
+
+        # 应用时间衰减权重
+        time_weights = self.time_weights[:, -seq_len:, :]
+        weighted_z = z * time_weights
+        z_flat = rearrange(weighted_z, 'b t d -> (b t) d')
+
+        # 计算距离
+        device = z.device
+        nodes_flat = self.nodes.to(device).view(-1, self.latent_dim)
+
+        dists = torch.norm(z_flat.unsqueeze(1) - nodes_flat.unsqueeze(0), p=2, dim=-1)
+
+        # 计算 q 值
+        q = 1.0 / (1.0 + dists / self.alpha) ** ((self.alpha + 1) / 2)
+        q = F.normalize(q, p=1, dim=-1)
+
+        # 找到最佳匹配单元（BMU）
+        _, bmu_indices = torch.min(dists, dim=-1)
+        bmu_indices = bmu_indices.view(batch_size, seq_len)
+
+        # 计算 SOM 编码后的输出
+        som_z = z + 0.1 * (nodes_flat[bmu_indices.view(-1)].view_as(z) - z)
+
+        return som_z, {
+            'q': q,
+            'bmu_indices': bmu_indices,
+            'nodes': self.nodes.view(self.grid_size[0], self.grid_size[1], -1),
+            'grid_size': self.grid_size,
+            'time_decay': self.time_decay
+        }
+
+
+class Encoder(nn.Module):
+    def __init__(self, n_features, embedding_dim, n_heads):
         super().__init__()
-        self.lstm = nn.LSTM(latent_dim, lstm_hidden_dim, batch_first=True)
-        self.out = nn.Linear(lstm_hidden_dim, latent_dim)
-
-    def forward(self, z, lengths):
-        packed = pack_padded_sequence(z, lengths.cpu(), batch_first=True, enforce_sorted=False)
-        h, _ = self.lstm(packed)
-        h, _ = pad_packed_sequence(h, batch_first=True)
-        z_pred = self.out(h)  # [B, T, latent_dim]
-        return z_pred
-
-class Decoder(nn.Module):
-    def __init__(self, latent_dim, hidden_dim, n_features):
-        super().__init__()
-        self.lstm = nn.LSTM(latent_dim, hidden_dim, batch_first=True)
-        self.out = nn.Linear(hidden_dim, n_features)
-
-    def forward(self, z, lengths):
-        packed = pack_padded_sequence(z, lengths.cpu(), batch_first=True, enforce_sorted=False)
-        h, _ = self.lstm(packed)
-        h, _ = pad_packed_sequence(h, batch_first=True)
-        x_recon = self.out(h)
-        return x_recon
-
-class  PatientAutoencoder(nn.Module):
-    def __init__(self, n_features, hidden_dim, latent_dim,
-                 grid_size, lstm_hidden_dim, n_heads):
-        super().__init__()
-        self.encoder = VAEEncoder(n_features, hidden_dim, latent_dim, n_heads)
-        self.psom    = PSOMClustering(grid_size, latent_dim)
-        self.predict = ZPredictor(latent_dim, lstm_hidden_dim)
-        self.decoder = Decoder(latent_dim, hidden_dim, n_features)
+        self.causal_cnn = DepthwiseCausalConv(n_features, kernel_size=3)
+        self.lstm = nn.LSTM(n_features, embedding_dim, batch_first=True)
+        self.informer = CausalInformerBlock(embedding_dim, n_heads)
 
     def forward(self, x, lengths):
-        # x: [B, T, D], lengths: [B]
-        z, mu, logvar = self.encoder(x, lengths)     # [B,T,L]
-        s = self.psom(z)                            # [B,T,M]
-        z_pred = self.predict(z, lengths)           # [B,T,L]
-        x_recon = self.decoder(z, lengths)           # [B,T,D]
-        return x_recon, mu, logvar, z, s, z_pred
+        x = self.causal_cnn(x)
+        packed = pack_padded_sequence(x, lengths.cpu(), batch_first=True, enforce_sorted=False)
+        x_out, _ = self.lstm(packed)
+        x_out, _ = pad_packed_sequence(x_out, batch_first=True)
+        return self.informer(x_out)
+
+class Decoder(nn.Module):
+    def __init__(self, embedding_dim, n_features, n_heads, dropout=0.1):
+        super().__init__()
+        self.lstm = nn.LSTM(embedding_dim, embedding_dim, batch_first=True)
+        self.informer = CausalInformerBlock(embedding_dim, n_heads, dropout=dropout)
+        self.out_proj = nn.Sequential(
+            nn.LayerNorm(embedding_dim),
+            nn.Linear(embedding_dim, embedding_dim),
+            nn.ReLU(),
+            nn.Linear(embedding_dim, n_features)
+        )
+
+    def forward(self, x):
+        x_lstm, _ = self.lstm(x)
+        skip = x_lstm
+        x_attn = self.informer(x_lstm)
+        x_out = x_attn + skip
+        return self.out_proj(x_out)
+
+
+class PatientAutoencoder(nn.Module):
+    def __init__(self, n_features, embedding_dim, n_heads, som_grid=[10,10]):
+        super().__init__()
+        self.encoder = Encoder(n_features, embedding_dim, n_heads)
+        self.som = SOMLayer(som_grid, embedding_dim)
+        self.decoder = Decoder(embedding_dim, n_features, n_heads)
+        self.use_som = True
+
+    def forward(self, x, seq_lengths):
+        z_e = self.encoder(x, seq_lengths)
+        if self.use_som:
+            som_z, aux_info = self.som(z_e)
+        else:
+            som_z, aux_info = z_e, {}
+
+        x_hat = self.decoder(som_z)
+
+        return x_hat, som_z, aux_info

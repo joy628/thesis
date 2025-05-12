@@ -149,7 +149,7 @@ def train_phase1_som_only(model, train_loader, val_loader, device, optimizer,
             print(f"[Phase1][Epoch {epoch}] train: {train_loss:.4f}, val: {val_loss:.4f}")
 
         if val_loss < best_loss:
-            best_loss = train_loss
+            best_loss = val_loss
             best_model = copy.deepcopy(model.state_dict())
             no_improve_epochs = 0
             save_model(model, os.path.join(save_path, 'best_model_som.pth'))

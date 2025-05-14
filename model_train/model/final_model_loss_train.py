@@ -81,10 +81,13 @@ def compute_alignment_loss(som_z, risk_scores):
 
 def compute_total_risk_som_loss(pred, target, lengths, categories,
                                 som_z, aux_info, som_weights,
+                                mortality_prob=None, mortality_label=None,
                                 risk_regression_weight=0.5,
-                                log_var_cls=None, log_var_reg=None):
+                                log_var_cls=None, log_var_reg=None,
+                                mortality_weight=0.5):
     """
     Full SOM + Risk loss with alignment, usage, smoothness and uncertainty-based weighting.
+    Now includes optional mortality classification loss.
     """
     # === Risk (BCE + MSE)
     risk_loss, category_losses, batch_loss = compute_risk_loss(
@@ -170,6 +173,11 @@ def compute_total_risk_som_loss(pred, target, lengths, categories,
             usage[node] = mask.float().mean() * weight
     usage_loss = -usage.mean()
 
+    # === Optional: mortality loss (death = class 3)
+    mortality_loss = 0.0
+    if mortality_prob is not None and mortality_label is not None:
+        mortality_loss = F.binary_cross_entropy(mortality_prob, (mortality_label == 3).float())
+
     total = (
         risk_loss +
         som_weights.get('kl', 0.1) * kl_loss +
@@ -179,7 +187,8 @@ def compute_total_risk_som_loss(pred, target, lengths, categories,
         som_weights.get('risk_cls', 1.0) * risk_cls_loss +
         risk_regression_weight * risk_reg_loss +
         som_weights.get('align', 0.2) * alignment_loss +
-        som_weights.get('usage', 0.1) * usage_loss
+        som_weights.get('usage', 0.1) * usage_loss +
+        mortality_weight * mortality_loss
     )
 
     return total, category_losses, batch_loss

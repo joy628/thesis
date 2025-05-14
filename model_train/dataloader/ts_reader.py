@@ -34,14 +34,16 @@ class MultiModalDataset(Dataset):
         ts_data = self.ts_h5f[patient_id][:, 1:]  # exclude the first column which is the time
         risk_data = self.risk_h5f[patient_id][:] #
         flat_data = self.flat_data.loc[int(patient_id)].values
-        category = int(risk_data[0][5])
+
+        category = int(risk_data[0][5])  # discharge_risk_category
+        mortality_label = int(risk_data[0][4])  # unitdischargestatus
         
         ts_data = torch.tensor(ts_data, dtype=torch.float32)
         flat_data = torch.tensor(flat_data, dtype=torch.float32)
         risk_data = torch.tensor(risk_data[:, -1], dtype=torch.float32) # risk data is the last column
 
         
-        return patient_id, flat_data,ts_data, risk_data, category
+        return patient_id, flat_data,ts_data, risk_data, category,mortality_label
 
     def close(self):
         self.ts_h5f.close()
@@ -49,7 +51,7 @@ class MultiModalDataset(Dataset):
 
     
 def collate_fn(batch):
-    patient_ids,  flat_list,ts_list, risk_list,category_list = zip(*batch)
+    patient_ids,  flat_list,ts_list, risk_list,category_list,mortality_labels = zip(*batch)
     lengths = [x.shape[0] for x in ts_list]
     lengths = torch.tensor(lengths, dtype=torch.long)
 
@@ -60,6 +62,7 @@ def collate_fn(batch):
     flat_list = [flat_list[i] for i in sorted_idx]
     patient_ids = [patient_ids[i] for i in sorted_idx]
     category_list = [category_list[i] for i in sorted_idx]
+    mortality_labels = [mortality_labels[i] for i in sorted_idx]
 
     # pad sequences
     padding_value = 0
@@ -67,8 +70,9 @@ def collate_fn(batch):
     padded_risk = pad_sequence(risk_list, batch_first=True, padding_value=padding_value)
     flat_data = torch.stack(flat_list)
     categories = torch.tensor(category_list, dtype=torch.long)
-     
-    return patient_ids,  flat_data, padded_ts, padded_risk, lengths,categories
+    mortality_labels = torch.tensor(mortality_labels, dtype=torch.long)
+    
+    return patient_ids,  flat_data, padded_ts, padded_risk, lengths,categories, mortality_labels
 
 
 

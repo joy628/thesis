@@ -149,11 +149,6 @@ def compute_total_risk_som_loss(pred, target, lengths, categories,
     som_risk_pred = torch.matmul(q[mask_flat], node_scalar).squeeze(-1)  # [B*T_valid]
     raw_reg_loss = F.mse_loss(som_risk_pred, risk_flat)
 
-    if log_var_cls is None:
-        log_var_cls = torch.tensor(0.0, device=device, requires_grad=True)
-    if log_var_reg is None:
-        log_var_reg = torch.tensor(0.0, device=device, requires_grad=True)
-
     risk_cls_loss = 0.5 * torch.exp(-log_var_cls) * raw_cls_loss + 0.5 * log_var_cls
     risk_reg_loss = 0.5 * torch.exp(-log_var_reg) * raw_reg_loss + 0.5 * log_var_reg
 
@@ -324,7 +319,8 @@ def train_patient_outcome_model(model, train_loader, val_loader, graph_data,
                                 optimizer, device, n_epochs, save_path,
                                 history_path, patience,
                                 use_som=False, som_weights=None,
-                                risk_regression_weight=0.5):
+                                risk_regression_weight=0.5,
+                                mortality_weight=0.5):
     history = {'train': [], 'val': [], 'category': []}
     stopper = EarlyStopping(patience=patience)
 
@@ -333,22 +329,26 @@ def train_patient_outcome_model(model, train_loader, val_loader, graph_data,
         train_loss_total = 0
 
         for batch in train_loader:
-            patient_ids, flat_data, ts_data, risk_data, lengths, risk_category = batch
+            patient_ids, flat_data, ts_data, risk_data, lengths, risk_category, mortality_labels = batch
             flat_data = flat_data.to(device)
             ts_data = ts_data.to(device)
             risk_data = risk_data.to(device)
             lengths = lengths.to(device)
             risk_category = risk_category.to(device)
+            mortality_labels = mortality_labels.to(device)
 
             optimizer.zero_grad()
-            pred, _, som_z, aux_info = model(flat_data, graph_data, patient_ids, ts_data, lengths)
+            pred, _, som_z, aux_info, mortality_prob,log_var_cls, log_var_reg  = model(flat_data, graph_data, patient_ids, ts_data, lengths)
 
             if use_som:
                 loss, _, _ = compute_total_risk_som_loss(
                     pred, risk_data, lengths, risk_category,
                     som_z, aux_info, som_weights,
+                    mortality_prob=mortality_prob,
+                    mortality_label=mortality_labels,
                     risk_regression_weight=risk_regression_weight,
-                    epoch=epoch
+                    log_var_cls=log_var_cls,
+                    log_var_reg=log_var_reg,
                 )
             else:
                 loss, _, _ = compute_risk_loss(pred, risk_data, lengths, risk_category)
@@ -365,21 +365,26 @@ def train_patient_outcome_model(model, train_loader, val_loader, graph_data,
 
         with torch.no_grad():
             for batch in val_loader:
-                patient_ids, flat_data, ts_data, risk_data, lengths, risk_category = batch
+                patient_ids, flat_data, ts_data, risk_data, lengths, risk_category, mortality_labels = batch
                 flat_data = flat_data.to(device)
                 ts_data = ts_data.to(device)
                 risk_data = risk_data.to(device)
                 lengths = lengths.to(device)
                 risk_category = risk_category.to(device)
+                mortality_labels = mortality_labels.to(device)
 
-                pred, _, som_z, aux_info = model(flat_data, graph_data, patient_ids, ts_data, lengths)
+                pred, _, som_z, aux_info,mortality_prob, log_var_cls, log_var_reg = model(flat_data, graph_data, patient_ids, ts_data, lengths)
 
                 if use_som:
                     val_loss, _, batch_losses = compute_total_risk_som_loss(
                         pred, risk_data, lengths, risk_category,
                         som_z, aux_info, som_weights,
+                        mortality_prob=mortality_prob,
+                        mortality_label=mortality_labels,
                         risk_regression_weight=risk_regression_weight,
-                        epoch=epoch
+                        log_var_cls=log_var_cls,
+                        log_var_reg=log_var_reg
+                        
                     )
                 else:
                     val_loss, _, batch_losses = compute_risk_loss(pred, risk_data, lengths, risk_category)
@@ -416,11 +421,11 @@ def train_patient_outcome_model(model, train_loader, val_loader, graph_data,
 
     return model, history
 
-    
-   
+
 def evaluate_model_on_test_set(model, test_loader, graph_data, device,
-                               save_json_path=None, use_som=False, som_weights=None,
-                               risk_regression_weight=0.5):
+                               use_som=False, som_weights=None,
+                               risk_regression_weight=0.5,
+                               mortality_weight=0.5):
     model.eval()
     all_losses = []
     all_categories = []
@@ -428,21 +433,23 @@ def evaluate_model_on_test_set(model, test_loader, graph_data, device,
 
     with torch.no_grad():
         for batch in tqdm(test_loader, desc="[Test] Evaluating"):
-            patient_ids, flat_data, ts_data, risk_data, lengths, risk_category = batch
+            patient_ids, flat_data, ts_data, risk_data, lengths, risk_category, mortality_labels = batch
             flat_data = flat_data.to(device)
             ts_data = ts_data.to(device)
             risk_data = risk_data.to(device)
             lengths = lengths.to(device)
             risk_category = risk_category.to(device)
+            mortality_labels = mortality_labels.to(device)
 
-            pred, _, som_z, aux_info = model(flat_data, graph_data, patient_ids, ts_data, lengths)
+            pred, _, som_z, aux_info, mortality_prob = model(flat_data, graph_data, patient_ids, ts_data, lengths)
 
             if use_som:
                 loss, _, batch_losses = compute_total_risk_som_loss(
                     pred, risk_data, lengths, risk_category,
                     som_z, aux_info, som_weights,
-                    risk_regression_weight=risk_regression_weight,
-                    epoch=None  # No epoch in test phase
+                    mortality_prob=mortality_prob,
+                    mortality_label=mortality_labels,
+                    risk_regression_weight=risk_regression_weight
                 )
             else:
                 loss, _, batch_losses = compute_risk_loss(pred, risk_data, lengths, risk_category)
@@ -468,12 +475,9 @@ def evaluate_model_on_test_set(model, test_loader, graph_data, device,
         res = category_results[i]
         print(f"  Risk Category {i}: Mean Loss = {res['avg_loss']:.4f}, Count = {res['count']}")
 
-    # === Optionally save to file
-    if save_json_path:
-        with open(save_json_path, 'w') as f:
-            json.dump(category_results, f, indent=2, default=lambda o: float('nan'))
 
     return avg_test_loss, category_results
+
 
 # === Training Plot  ===
 def plot_training_history(history):

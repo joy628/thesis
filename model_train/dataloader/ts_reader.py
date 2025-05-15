@@ -18,10 +18,12 @@ class MultiModalDataset(Dataset):
         self.ts_h5_file = os.path.join(self.data_path, 'ts_each_patient.h5')
         self.risks_h5_file = os.path.join(self.data_path, 'risk_each_patient.h5')
         self.flat_h5_file = os.path.join(self.data_path, 'flat.h5')
+        self.diag_h5_file = os.path.join(self.data_path, 'diagnosis.h5')
         
         self.ts_h5f = h5py.File(self.ts_h5_file, 'r')
         self.risk_h5f = h5py.File(self.risks_h5_file, 'r')
         self.flat_data = pd.read_hdf(self.flat_h5_file)
+        self.diag_data = pd.read_hdf(self.diag_h5_file)
         
         self.patient_ids = list(self.ts_h5f.keys())
 
@@ -34,7 +36,8 @@ class MultiModalDataset(Dataset):
         ts_data = self.ts_h5f[patient_id][:, 1:]  # exclude the first column which is the time
         risk_data = self.risk_h5f[patient_id][:] #
         flat_data = self.flat_data.loc[int(patient_id)].values
-
+       
+        diag_mask = torch.tensor(self.diag_data.loc[patient_id].values == 1, dtype=torch.bool)  # [num_diag_codes]
         category = int(risk_data[0][5])  # discharge_risk_category
         mortality_label = int(risk_data[0][4])  # unitdischargestatus
         
@@ -43,7 +46,7 @@ class MultiModalDataset(Dataset):
         risk_data = torch.tensor(risk_data[:, -1], dtype=torch.float32) # risk data is the last column
 
         
-        return patient_id, flat_data,ts_data, risk_data, category,mortality_label
+        return patient_id, flat_data,ts_data, risk_data, category,mortality_label,diag_mask
 
     def close(self):
         self.ts_h5f.close()
@@ -51,7 +54,7 @@ class MultiModalDataset(Dataset):
 
     
 def collate_fn(batch):
-    patient_ids,  flat_list,ts_list, risk_list,category_list,mortality_labels = zip(*batch)
+    patient_ids,  flat_list,ts_list, risk_list,category_list,mortality_labels,diag_mask = zip(*batch)
     lengths = [x.shape[0] for x in ts_list]
     lengths = torch.tensor(lengths, dtype=torch.long)
 
@@ -63,7 +66,8 @@ def collate_fn(batch):
     patient_ids = [patient_ids[i] for i in sorted_idx]
     category_list = [category_list[i] for i in sorted_idx]
     mortality_labels = [mortality_labels[i] for i in sorted_idx]
-
+    diag_mask = [diag_mask[i] for i in sorted_idx]
+    
     # pad sequences
     padding_value = 0
     padded_ts = pad_sequence(ts_list, batch_first=True, padding_value=padding_value)
@@ -71,8 +75,9 @@ def collate_fn(batch):
     flat_data = torch.stack(flat_list)
     categories = torch.tensor(category_list, dtype=torch.long)
     mortality_labels = torch.tensor(mortality_labels, dtype=torch.long)
+    diag_mask = torch.tensor(diag_mask, dtype=torch.float32)
     
-    return patient_ids,  flat_data, padded_ts, padded_risk, lengths,categories, mortality_labels
+    return patient_ids,  flat_data, padded_ts, padded_risk, lengths,categories, mortality_labels, diag_mask
 
 
 

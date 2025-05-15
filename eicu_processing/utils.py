@@ -152,12 +152,12 @@ def build_mapping_dict(unique_diagnoses):
     count = 0 # Running count of unique codes， 全局递增的计数器，用于为每个唯一的诊断（包括层级结构中的节点）生成一个唯一的整数编号
 
     for diagnosis in sorted(unique_diagnoses):
-        if diagnosis.startswith('notes/Progress Notes/Past History/Organ Systems/'):
-            splits = diagnosis.replace('notes/Progress Notes/Past History/Organ Systems/', '').split('/')
-        # elif diagnosis.startswith('notes/Progress Notes/Past History/Past History Obtain Options/'):
-        #     splits = diagnosis.replace('notes/Progress Notes/Past History/Past History Obtain Options/', '').split('/')
-        else:
-            splits = diagnosis.split('|')
+        # if diagnosis.startswith('notes/Progress Notes/Past History/Organ Systems/'):
+        #     splits = diagnosis.replace('notes/Progress Notes/Past History/Organ Systems/', '').split('/')
+        # # elif diagnosis.startswith('notes/Progress Notes/Past History/Past History Obtain Options/'):
+        # #     splits = diagnosis.replace('notes/Progress Notes/Past History/Past History Obtain Options/', '').split('/')
+        # else:
+        splits = diagnosis.split('|')
 
         codes, count = add_codes(splits, codes_dict, words_dict, count)
         mapping_dict[diagnosis] = codes

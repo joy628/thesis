@@ -97,6 +97,17 @@ class SOMRiskClassifier(nn.Module):
     def forward(self, q):  # q: [B*T, num_nodes]
         return self.fc(q)  # logits: [B*T, num_classes]
 
+class MortalityPredictor(nn.Module):
+    def __init__(self, input_dim, hidden_dim):
+        super().__init__()
+        self.fc1 = nn.Linear(input_dim, hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, 1)
+
+    def forward(self, x):
+        x = F.relu(self.fc1(x))
+        x = torch.sigmoid(self.fc2(x))
+        return x
+
 # === Full Model ===
 class PatientOutcomeModel(nn.Module):
     def __init__(self, flat_input_dim, graph_input_dim, hidden_dim, som=None, pretrained_encoder=None):
@@ -108,7 +119,11 @@ class PatientOutcomeModel(nn.Module):
         self.fusion = FeatureAttentionFusion(hidden_dim, hidden_dim)
         self.risk_predictor = RiskPredictor(hidden_dim, hidden_dim, hidden_dim)
         self.som_classifier = SOMRiskClassifier(som.grid_size, num_classes=4)
+        self.mortality_predictor = MortalityPredictor(hidden_dim, hidden_dim)
         self.use_som_for_risk = True 
+        ## parameter for loss function
+        self.log_var_cls = nn.Parameter(torch.tensor(0.0))
+        self.log_var_reg = nn.Parameter(torch.tensor(0.0))
         
 
     def forward(self, flat_data, graph_data, patient_ids, ts_data, lengths):
@@ -142,6 +157,8 @@ class PatientOutcomeModel(nn.Module):
         q = aux_info['q']  # [B*T, N]
         logits = self.som_classifier(q) 
         aux_info['logits'] = logits
+        #  === Mortality Prediction ===
+        mortality_prob = self.mortality_predictor(fused_static)
         # === Risk Prediction ===
         risk_scores = self.risk_predictor(fused_static, ts)  # [B, T]
-        return risk_scores,ts_emb,som_z,aux_info
+        return risk_scores,ts_emb,som_z,aux_info,mortality_prob,self.log_var_cls, self.log_var_reg 

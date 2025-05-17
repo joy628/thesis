@@ -157,7 +157,7 @@ def build_mapping_dict(unique_diagnoses):
         # # elif diagnosis.startswith('notes/Progress Notes/Past History/Past History Obtain Options/'):
         # #     splits = diagnosis.replace('notes/Progress Notes/Past History/Past History Obtain Options/', '').split('/')
         # else:
-        splits = diagnosis.split('|')
+        splits = diagnosis.split('/')
 
         codes, count = add_codes(splits, codes_dict, words_dict, count)
         mapping_dict[diagnosis] = codes
@@ -201,7 +201,6 @@ def add_admission_diagnoses(sparse_df, flat, cutoff):
     adm_diag = adm_diag.T.groupby(
     {diag: f'grouped_{diag.split()[0]}' if diag in rare_adm_diag else diag for diag in adm_diag.columns}
 ).sum().T
-
 
     # Drop remaining rare diagnoses
     adm_diag = adm_diag.drop(columns=find_rare_codes(cutoff, adm_diag))

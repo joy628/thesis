@@ -6,15 +6,23 @@ from itertools import combinations
 from torch.utils.data import Dataset
 from collections import defaultdict
 from torch_geometric.data import Dataset, DataLoader
+import networkx as nx
+import matplotlib.pyplot as plt
+from torch_geometric.utils import to_networkx
+from collections import defaultdict
+from torch_geometric.loader import DataLoader
 
-def build_graph(df):
-    
+
+def global_node2idx_mapping(df):
     roots = df['first'].unique().tolist()
     leaves = (df['first'] + '|' + df['second']).unique().tolist()
     all_nodes = roots + [l for l in leaves if l not in roots]  # 保持顺序、去重  
     global_node2idx = {node: i for i, node in enumerate(all_nodes)}
-    num_global = len(global_node2idx)
+    
+    return global_node2idx
 
+def build_graph(df, global_node2idx):
+    
     patient_graphs = []
 
     for pid, grp in df.groupby('patient'):
@@ -95,6 +103,61 @@ class PatientGraphDataset(Dataset):
 
     def get(self, idx):
         return self.graphs[idx]
+
+##### Visualization #####
+
+def visualize_patient_graph(data, node_names,k, figsize=(10,10)):
+    """
+    draw a patient graph
+
+    Args:
+      data:        PyG Data object
+      node_names:  list[str],length == data.x.size(0)
+      figsize:     figure size
+    """
+    # 1) PyG -> NetworkX, undirected graph
+    G = to_networkx(data, to_undirected=True)
+
+    # 2) layout
+    pos = nx.spring_layout(G, k=k,seed=123)
+
+    # 3) get number of nodes
+    num_nodes = data.num_nodes if isinstance(data.num_nodes, int) else data.x.size(0)
+
+    # 4) if data has mask, use it to determine node colors
+    if hasattr(data, 'mask'):
+        mask = data.mask.cpu().numpy().astype(bool)
+    else:
+        mask = np.ones(num_nodes, dtype=bool)
+
+    node_colors = ['lightblue' if mask[i] else 'lightgray' for i in range(num_nodes)]
+
+    plt.figure(figsize=figsize)
+    # 5) draw nodes
+    nx.draw_networkx_nodes(G, pos,
+                           node_color=node_colors,
+                           node_size=300,
+                           edgecolors='k',
+                           linewidths=0.5)
+    # 6) draw edges
+    nx.draw_networkx_edges(G, pos, alpha=0.6, width=1.0)
+    # 7) draw labels
+    nx.draw_networkx_labels(G, pos,
+                            labels={i: node_names[i] for i in range(num_nodes)},
+                            font_size=8)
+
+    plt.title(f"Patient {getattr(data, 'patient_id', '')} Diagnosis Graph", fontsize=14)
+    plt.axis('off')
+    plt.show()
+
+def visualize_by_patient_id(patient_graphs, target_pid, k=0.5, figsize=(10,10)):
+    """
+    draw a patient graph by patient ID
+    """
+    for data in patient_graphs:
+        if getattr(data, 'patient_id', None) == target_pid:
+            visualize_patient_graph(data, data.node_names, k=k, figsize=figsize)
+
 
 
 # class GraphDataset(InMemoryDataset):

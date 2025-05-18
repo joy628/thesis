@@ -4,31 +4,97 @@ import numpy as np
 from collections import Counter
 from itertools import combinations
 from torch.utils.data import Dataset
+from collections import defaultdict
+from torch_geometric.data import Dataset, DataLoader
 
+def build_graph(df):
+    
+    roots = df['first'].unique().tolist()
+    leaves = (df['first'] + '|' + df['second']).unique().tolist()
+    all_nodes = roots + [l for l in leaves if l not in roots]  # 保持顺序、去重  
+    global_node2idx = {node: i for i, node in enumerate(all_nodes)}
+    num_global = len(global_node2idx)
 
-def build_graph_data( diag,min_cooccur=2):
-    """
-    Build a PyG Data object from a diagnosis DataFrame.
-    diag: [n,n_diagnosis] matrix
-    min_cooccur: minimum number of co-occurrences to consider an edge
-    """
-    num_nodes = diag.shape[1]
-    edge_counter = Counter() 
-    
-    for row in diag.values:
-        activate = np.where(row ==1)[0] # active nodes
-        for i, j in combinations(activate, 2): 
-            edge = tuple(sorted([i, j])) # sort to avoid duplicates
-            edge_counter[edge] += 1
-    
-    # keep edges with at least min_cooccur co-occurrences
-    edge_list = [(i,j) for (i,j), count in edge_counter.items() if count >= min_cooccur]
-    edge_index = torch.tensor(edge_list + [(j,i) for (i,j) in edge_list], dtype=torch.long).T # undirected graph
-    
-    x = torch.eye(num_nodes)
-    
-    return Data(x=x, edge_index=edge_index)
+    patient_graphs = []
 
+    for pid, grp in df.groupby('patient'):
+        # 1) collect all Level-1 roots
+        roots = grp['first'].unique().tolist()
+
+        # 2) collect all Level-2 leaves and their parents then combine them via '|'
+        leaves = (grp['first'] + '|' + grp['second']).unique().tolist()
+
+        # 3) put roots and leaves together
+        nodes = roots + leaves
+        node2idx = {node: i for i, node in enumerate(nodes)}
+
+        # 4) build a global node2idx mapping
+        x = torch.zeros((len(nodes), len(global_node2idx)), dtype=torch.float)
+        for i, n in enumerate(nodes):
+            x[i, global_node2idx[n]] = 1  
+
+        # 5) build edges
+        edge_list = []
+        #   5.1 from leaves to roots
+        for leaf in leaves:
+            root = leaf.split('|', 1)[0]
+            u = node2idx[root]
+            v = node2idx[leaf]
+            # undirected edges
+            edge_list.append([u, v])
+            edge_list.append([v, u])
+
+        # #   5.2 from roots to roots
+        # for r1, r2 in combinations(roots, 2):
+        #     u = node2idx[r1]
+        #     v = node2idx[r2]
+        #     edge_list.append([u, v])
+        #     edge_list.append([v, u])
+            
+        #   5.3 from leaves to leaves
+        root_to_leaves = defaultdict(list)
+        for leaf in leaves:
+            root = leaf.split('|', 1)[0]
+            root_to_leaves[root].append(leaf)   ## collect leaves under the same root, e.g  {'A': ['leaf1', 'leaf2'], 'B': ['leaf3']})
+        for same_root_leaves in root_to_leaves.values():
+            # if there are multiple leaves under the same root, connect them to each other
+            if len(same_root_leaves) > 1:
+                for l1, l2 in combinations(same_root_leaves, 2):
+                    u = node2idx[l1]
+                    v = node2idx[l2]
+                    edge_list += [[u, v], [v, u]]
+        ## edge index shape [2, num_edges]
+        if edge_list:
+            edge_index = torch.tensor(edge_list, dtype=torch.long).t().contiguous()
+        else:
+            edge_index = torch.zeros((2, 0), dtype=torch.long)
+
+        # 6) build into PyG Data object
+        data = Data(x=x, edge_index=edge_index)
+        data.patient_id = int(pid)
+        data.node_names = nodes
+        # keep mask to indicate which nodes are leaves or roots
+        data.mask = torch.zeros(len(nodes), dtype=torch.bool)
+        for leaf in leaves:
+            data.mask[node2idx[leaf]] = True
+        for root in roots:
+            data.mask[node2idx[root]] = True
+
+        patient_graphs.append(data)
+
+    print(f"Built {len(patient_graphs)} patient-tree graphs")
+    return patient_graphs
+
+class PatientGraphDataset(Dataset):
+    def __init__(self, graphs, transform=None):
+        super().__init__(root=None, transform=transform)  
+        self.graphs = graphs
+
+    def len(self):
+        return len(self.graphs)
+
+    def get(self, idx):
+        return self.graphs[idx]
 
 
 # class GraphDataset(InMemoryDataset):

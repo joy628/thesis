@@ -458,7 +458,7 @@ def split_train_test(eICU_path, flat_features, diagnoses,timeseries,risks,seed=9
         with open(stays_path, 'w') as f:
             for stay in stays:
                 f.write(f"{stay}\n")
-        for table_name, table in zip(['flat', 'diagnoses', 'timeseries','risks'], [ flat_features, diagnoses,timeseries,risks]):
+        for table_name, table in zip(['flat', 'diagnoses_level', 'timeseries','risks'], [ flat_features, diagnoses,timeseries,risks]):
             process_table(table_name, table, stays, folder_path)
         print(f'==> {partition_name} data saved!\n')
         

@@ -127,19 +127,16 @@ class PatientOutcomeModel(nn.Module):
         self.log_var_reg = nn.Parameter(torch.tensor(0.0))
         
 
-    def forward(self, flat_data, graph_data, patient_ids, ts_data, lengths):
+    def forward(self, flat_data, graph_data, ts_data, lengths):
         device = ts_data.device
-        edge_index, graph_x = graph_data.edge_index.to(device), graph_data.x.to(device)
-        graph_patient_ids = graph_data.patient_ids.to(device)
-
+   
         # === Graph Embedding  ===
-        node_emb = self.graph_encoder(graph_data.x.to(device),
-                                      graph_data.edge_index.to(device))
-        mask = graph_data.mask.to(device).unsqueeze(-1)        # [num_nodes, 1]
-        batch_idx = graph_data.batch.to(device)
-        masked_emb = node_emb * mask                            # 非 mask 节点会变成 0
-        graph_emb = scatter_mean(masked_emb, batch_idx, dim=0)  # [B, D]
-        
+        x, edge_index, batch = graph_data.x.to(device), graph_data.edge_index.to(device), graph_data.batch.to(device)
+        node_emb = self.graph_encoder(x, edge_index)    # [sum_nodes, D]
+        # Aggregate node features to get graph-level representation
+        mask = graph_data.mask.to(device).unsqueeze(-1)        # [sum_nodes, 1]
+        masked_emb = node_emb * mask  
+        graph_emb = scatter_mean(masked_emb, batch, dim=0)     # [B, D]
 
         # === Flat Embedding ===
         flat_emb = self.flat_encoder(flat_data)  # [B, D]

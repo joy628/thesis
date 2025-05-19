@@ -236,7 +236,8 @@ def tune_ts_encoder_and_som(model, train_loader, val_loader, device, optimizer,
         total_train_loss = 0
 
         for batch in train_loader:
-            _, _, ts_data, risk_data, lengths, _ = batch
+            # patient_ids,  flat_data, padded_ts, graphs_batch ,padded_risk, lengths,categories, mortality_labels
+            _, _, ts_data, _,risk_data, lengths, _,_ = batch
             ts_data, risk_data, lengths = ts_data.to(device), risk_data.to(device), lengths.to(device)
 
             optimizer.zero_grad()
@@ -277,7 +278,7 @@ def tune_ts_encoder_and_som(model, train_loader, val_loader, device, optimizer,
         total_val_loss = 0
         with torch.no_grad():
             for batch in val_loader:
-                _, _, ts_data, risk_data, lengths, _ = batch
+                _, _, ts_data, _,risk_data, lengths, _,_ = batch
                 ts_data, risk_data, lengths = ts_data.to(device), risk_data.to(device), lengths.to(device)
 
                 ts_emb = model.ts_encoder(ts_data, lengths)
@@ -329,16 +330,17 @@ def train_patient_outcome_model(model, train_loader, val_loader, graph_data,
         train_loss_total = 0
 
         for batch in train_loader:
-            patient_ids, flat_data, ts_data, risk_data, lengths, risk_category, mortality_labels = batch
+            _, flat_data, ts_data, graph_data,risk_data, lengths, risk_category, mortality_labels = batch
             flat_data = flat_data.to(device)
             ts_data = ts_data.to(device)
+            graph_data = graph_data.to(device)
             risk_data = risk_data.to(device)
             lengths = lengths.to(device)
             risk_category = risk_category.to(device)
             mortality_labels = mortality_labels.to(device)
 
             optimizer.zero_grad()
-            pred, _, som_z, aux_info, mortality_prob,log_var_cls, log_var_reg  = model(flat_data, graph_data, patient_ids, ts_data, lengths)
+            pred, _, som_z, aux_info, mortality_prob,log_var_cls, log_var_reg  = model(flat_data, graph_data, ts_data, lengths)
 
             if use_som:
                 loss, _, _ = compute_total_risk_som_loss(
@@ -365,15 +367,16 @@ def train_patient_outcome_model(model, train_loader, val_loader, graph_data,
 
         with torch.no_grad():
             for batch in val_loader:
-                patient_ids, flat_data, ts_data, risk_data, lengths, risk_category, mortality_labels = batch
+                _, flat_data, ts_data, graph_data,risk_data, lengths, risk_category, mortality_labels = batch
                 flat_data = flat_data.to(device)
                 ts_data = ts_data.to(device)
+                graph_data = graph_data.to(device)
                 risk_data = risk_data.to(device)
                 lengths = lengths.to(device)
                 risk_category = risk_category.to(device)
                 mortality_labels = mortality_labels.to(device)
 
-                pred, _, som_z, aux_info,mortality_prob, log_var_cls, log_var_reg = model(flat_data, graph_data, patient_ids, ts_data, lengths)
+                pred, _, som_z, aux_info,mortality_prob, log_var_cls, log_var_reg = model(flat_data, graph_data, ts_data, lengths)
 
                 if use_som:
                     val_loss, _, batch_losses = compute_total_risk_som_loss(
@@ -433,15 +436,16 @@ def evaluate_model_on_test_set(model, test_loader, graph_data, device,
 
     with torch.no_grad():
         for batch in tqdm(test_loader, desc="[Test] Evaluating"):
-            patient_ids, flat_data, ts_data, risk_data, lengths, risk_category, mortality_labels = batch
+            _, flat_data, ts_data, graph_data,risk_data, lengths, risk_category, mortality_labels = batch
             flat_data = flat_data.to(device)
             ts_data = ts_data.to(device)
+            graph_data = graph_data.to(device)
             risk_data = risk_data.to(device)
             lengths = lengths.to(device)
             risk_category = risk_category.to(device)
             mortality_labels = mortality_labels.to(device)
 
-            pred, _, som_z, aux_info, mortality_prob = model(flat_data, graph_data, patient_ids, ts_data, lengths)
+            pred, _, som_z, aux_info, mortality_prob = model(flat_data, graph_data,ts_data, lengths)
 
             if use_som:
                 loss, _, batch_losses = compute_total_risk_som_loss(

@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.nn import GCNConv, BatchNorm
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
+from torch_scatter import scatter_mean
 
 
 
@@ -131,14 +132,14 @@ class PatientOutcomeModel(nn.Module):
         edge_index, graph_x = graph_data.edge_index.to(device), graph_data.x.to(device)
         graph_patient_ids = graph_data.patient_ids.to(device)
 
-        # === Graph Embedding for all nodes ===
-        node_embeddings = self.graph_encoder(graph_x, edge_index)
-
-        # === Extract batch graph embeddings ===
-        pid_to_index = {int(pid): idx for idx, pid in enumerate(graph_patient_ids)}
-        batch_indices = torch.tensor([pid_to_index[int(pid)] for pid in patient_ids], device=device)
-
-        graph_emb = node_embeddings[batch_indices]  # [B, D]
+        # === Graph Embedding  ===
+        node_emb = self.graph_encoder(graph_data.x.to(device),
+                                      graph_data.edge_index.to(device))
+        mask = graph_data.mask.to(device).unsqueeze(-1)        # [num_nodes, 1]
+        batch_idx = graph_data.batch.to(device)
+        masked_emb = node_emb * mask                            # 非 mask 节点会变成 0
+        graph_emb = scatter_mean(masked_emb, batch_idx, dim=0)  # [B, D]
+        
 
         # === Flat Embedding ===
         flat_emb = self.flat_encoder(flat_data)  # [B, D]

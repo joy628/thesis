@@ -8,141 +8,35 @@ import seaborn as sns
 import os
 import sys
 sys.path.append('/home/mei/nas/docker/thesis/model_train')
-from model.autoencoder_v3_loss_train import generate_mask
 from tqdm import tqdm
 import copy
 from torch_geometric.data import Batch
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 
+bce_loss_fn = nn.BCELoss(reduction='none')
 
-# === Risk Loss for model ===
-def compute_risk_loss(pred, target, lengths, categories, mort_p, mortality_label,
-                      weight_per_category={0: 1.0, 1: 1.0, 2: 2.0, 3: 10.0},
-                      mort_ratio=0.5):
-    """
-    pred:     [B, T] - predicted risk scores from the model
-    target:   [B, T] - target scores 
-    lengths:  [B]    - sequence lengths
-    categories: [B]  - risk class labels
-    mort_p:   [B]    - predicted mortality probability
-    mortality_label: [B] - true mortality label
-    """
-    B, T = pred.shape
-    device = pred.device
-    mask = generate_mask(T, lengths, device).float()  # [B, T]
+def unfreeze(module):
+    for p in module.parameters():
+        p.requires_grad = True
 
-    if categories.dim() == 1:
-        categories = categories.unsqueeze(1).expand(-1, T)  # [B, T]
+def freeze(module):
+    for p in module.parameters():
+        p.requires_grad = False
 
-    # === Weights ===
-    weights = torch.ones_like(pred, device=device)
-    for cls, w in weight_per_category.items():
-        weights[categories == cls] = w
-
-    # === Risk MSE ===
-    mse = F.mse_loss(pred, target, reduction='none')
-    mse_loss = (mse * weights * mask).sum() / (mask.sum() + 1e-8)
-
-    # === Mortality Loss ===
-    
-    p = mort_p.view(-1)  # [B]
-    y = mortality_label.float()  # [B]
-    loss_mort = F.binary_cross_entropy(p, y)
-
-    # === Total Loss ===
-    total_loss = mort_ratio * loss_mort + mse_loss
-
-    # === Per-patient loss for analysis ===
-    per_patient_loss = (mse * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1)
-
-    # === Category-wise loss ===
-    category_losses = {}
-    cat_vec = categories[:, 0]
-    for i in range(4):
-        cls_losses = per_patient_loss[cat_vec == i]
-        if cls_losses.numel() > 0:
-            category_losses[i] = (cls_losses.mean().item(), cls_losses.numel())
-
-    return total_loss, category_losses, per_patient_loss.detach()
-
-
-def compute_alignment_loss(som_z, risk_scores):
-    z_repr = som_z.mean(dim=1)             # [B, D]
-    r_repr = risk_scores.mean(dim=1)       # [B]
-    z_dist = F.pdist(z_repr)
-    r_dist = F.pdist(r_repr.unsqueeze(1))
-    # avoid division by zero
-    denom = r_dist.max().clamp(min=1e-8)
-    r_dist = r_dist / denom
-    return F.mse_loss(z_dist, r_dist)
-
-def compute_multi_scale_smoothness(som_z, T, lengths):
-    losses = []
-    for stride in (1, 3, 6):
-        if T > stride:
-            diff = som_z[:, stride:] - som_z[:, :-stride]
-            mask = generate_mask(T - stride, lengths - stride, device=som_z.device).unsqueeze(-1)
-            losses.append((diff.norm(dim=-1) * mask.squeeze(-1)).mean())
-    return torch.stack(losses).mean() if losses else torch.tensor(0., device=som_z.device)
-
-def compute_som_loss(target, lengths, som_z, aux_info, som_weights=None):
-    som_weights = som_weights or {}
-    device = target.device
-
-    q    = aux_info['q'].to(device)         # [B*T, N]
-    nodes= aux_info['nodes'].to(device)     # [H, W, D]
-    bmu  = aux_info['bmu_indices'].to(device)# [B, T]
-    grid_size = aux_info['grid_size']       # Python tuple
-    B, T = target.shape
-    D    = nodes.size(-1)
-    N    = nodes.view(-1, D).size(0)
-
-    # === Regression Loss ===
-    mask = generate_mask(T, lengths, device).view(-1).bool()
-    tgt = target.view(-1)[mask]
-    node_scalar = nodes.view(N, D) @ torch.ones(D,1,device=device)
-    pred = q[mask] @ node_scalar
-    reg_loss = F.mse_loss(pred.squeeze(-1), tgt)
-
-    # === Usage & Entropy Loss ===
-    flat_bmu = bmu.view(-1)
-    usage = torch.bincount(flat_bmu, minlength=N).float().to(device) + 1e-6
-    usage = usage / usage.sum()
-    entropy_loss = -(usage * torch.log(usage)).sum()
-    usage_loss   = F.relu((1.0 / N) - usage).mean()
-
-    # === KL Loss ===
-    p = (q**2) / q.pow(2).sum(dim=0,keepdim=True)
-    p = F.normalize(p, p=1, dim=-1)
-    kl_loss = F.kl_div(q.log(), p.detach(), reduction='batchmean')
-
-    nodes_flat = nodes.view(-1, D)
-    diversity_loss = -(nodes_flat.unsqueeze(0) - nodes_flat.unsqueeze(1)).norm(dim=-1).mean()
-
-    # === Smoothness Loss ===
-    smooth_loss   = compute_multi_scale_smoothness(som_z, T, lengths)
-    
-    # === Neighbor Loss ===
-    prev_coords = torch.stack([bmu[:, :-1] // grid_size[1],
-                               bmu[:, :-1] % grid_size[1]], dim=-1)
-    next_coords = torch.stack([bmu[:, 1:] // grid_size[1],
-                               bmu[:, 1:] % grid_size[1]], dim=-1)
-    neighbor_loss = torch.abs(prev_coords - next_coords).sum(dim=-1).float().mean()
-
-    # === Alignment Loss ===
-    align_loss = compute_alignment_loss(som_z, target)
-    
-    # === Total Loss ===
-    total = (
-        som_weights.get('reg',      0.5)*reg_loss +
-        som_weights.get('usage',    0.5)*usage_loss +
-        som_weights.get('entropy',  0.5)*entropy_loss +
-        som_weights.get('kl',       0.1)*kl_loss +
-        som_weights.get('diversity',0.1)*diversity_loss +
-        som_weights.get('smooth',   0.1)*smooth_loss +
-        som_weights.get('neighbor', 0.1)*neighbor_loss +
-        som_weights.get('align',    0.1)*align_loss
-    )
-    return total
+def build_patient_start_offset_dict(train_loader_for_p):
+    print("[Joint] Building patient_start_offset_global as dict...")
+    offset_dict = {} # 记录每个病人序列在全局序列中的起始位置
+    current_offset = 0 # 累加所有病人序列的长度
+    with torch.no_grad():
+        for _, _, _, _,_, lengths_batch, _, _,original_indices_batch in train_loader_for_p:
+            
+            lengths_batch = lengths_batch.cpu()
+            original_indices_batch = original_indices_batch.cpu()
+            for orig_idx, seq_len in zip(original_indices_batch, lengths_batch):
+                offset_dict[int(orig_idx)] = current_offset
+                current_offset += int(seq_len)
+    print(f"[Joint] Offset dict built for {len(offset_dict)} patients. Total length: {current_offset}")
+    return offset_dict 
 
 # === Early Stopping Helper ===
 class EarlyStopping:
@@ -168,172 +62,237 @@ class EarlyStopping:
 
 # === Training Loop ===
 
-### stage 1: train som and ecoder
+def train_patient_outcome_model(model, 
+            train_loader, val_loader, train_loader_for_p, device, optimizer,  epochs: int, save_dir: str, 
+            theta=1, gamma=50, kappa=1, beta=10, eta=1,
+            patience: int = 20, update_P_every_n_epochs: int = 5 ):
 
-def unfreeze(module):
-    for p in module.parameters():
-        p.requires_grad = True
-
-def freeze(module):
-    for p in module.parameters():
-        p.requires_grad = False
- 
-def tune_ts_encoder_and_som(model, train_loader, val_loader, device, optimizer,
-                            epochs=10, patience=5, save_path=None,
-                            som_weights=None):
-    print("[Tune] Fine-tuning TS Encoder + SOM ")
-
-    unfreeze(model.ts_encoder)
-    unfreeze(model.som_layer)
-
-    best_loss = float('inf')
-    best_model = copy.deepcopy(model.state_dict())
-    no_improve = 0
-    history = {'train': [], 'val': []}
-
-    for epoch in range(1, epochs + 1):
-        model.train()
-        total_train_loss = 0
-
-        for batch in train_loader:
-            # patient_ids,  flat_data, padded_ts, graphs_batch ,padded_risk, lengths,categories, mortality_labels
-            _, _, ts_data, _,risk_data, lengths, _,_ = batch
-            ts_data, risk_data, lengths = ts_data.to(device), risk_data.to(device), lengths.to(device)
-
-            optimizer.zero_grad()
-            ts_emb = model.ts_encoder(ts_data, lengths)
-            som_z, aux = model.som_layer(ts_emb)
-
-            loss = compute_som_loss(risk_data, lengths, som_z, aux, som_weights)
-   
-            loss.backward()
-            optimizer.step()
-            total_train_loss += loss.item()
-
-        train_loss = total_train_loss / len(train_loader)
-        history['train'].append(train_loss)
-
-        # === Validation ===
-        model.eval()
-        total_val_loss = 0
-        with torch.no_grad():
-            for batch in val_loader:
-                _, _, ts_data, _,risk_data, lengths, _,_ = batch
-                ts_data, risk_data, lengths = ts_data.to(device), risk_data.to(device), lengths.to(device)
-
-                ts_emb = model.ts_encoder(ts_data, lengths)
-                som_z, aux = model.som_layer(ts_emb)
-               
-                val_loss = compute_som_loss(risk_data, lengths, som_z, aux, som_weights)
-                
-                total_val_loss += val_loss.item()
-
-        val_loss = total_val_loss / len(val_loader)
-        history['val'].append(val_loss)
-        if epoch % 5 == 0:
-            print(f"[Epoch {epoch}] Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
-
-        if val_loss < best_loss:
-            best_loss = val_loss
-            best_model = copy.deepcopy(model.state_dict())
-            no_improve = 0
-            if save_path:
-                torch.save(best_model, save_path)
-        else:
-            no_improve += 1
-            if no_improve >= patience:
-                print("Early stopping triggered.")
-                break
-
-    model.load_state_dict(best_model)
-    return model, history
-
-def train_patient_outcome_model(model, train_loader, val_loader,
-                                optimizer, device, n_epochs, save_path,
-                                history_path, patience,
-                                ):
-
-    freeze(model.som_layer)
+    for param in model.parameters():
+        param.requires_grad = True
     
-    history = {'train': [], 'val': [], 'category': []}
-    stopper = EarlyStopping(patience=patience)
+    
+    os.makedirs(save_dir, exist_ok=True)
+    
+    best_val_loss = float('inf')
+    best_model_wts = copy.deepcopy(model.state_dict())
+    history = {
+        'train_loss': [], 'val_loss': [], 'cat':[],
+        'train_risk': [],  'train_mortality': [],
+        'train_cah': [], 'train_s_som': [], 'train_smooth': []
+    }
 
-    for epoch in range(1, n_epochs + 1):
-        model.train()
-        train_loss_total = 0
-
-        for batch in train_loader:
-            _, flat_data, ts_data, graph_data,risk_data, lengths, risk_category, mortality_labels = batch
-            flat_data = flat_data.to(device)
-            ts_data = ts_data.to(device)
-            graph_data = graph_data.to(device)
-            risk_data = risk_data.to(device)
-            lengths = lengths.to(device)
-            risk_category = risk_category.to(device)
-            mortality_labels = mortality_labels.to(device)
-
-            optimizer.zero_grad()
-            pred, _, _, _, mortality_prob,_, _  = model(flat_data, graph_data, ts_data, lengths)
-
-            loss, _, _ = compute_risk_loss(pred, risk_data, lengths, risk_category,mortality_prob,mortality_labels)
-
-            loss.backward()
-            optimizer.step()
-            train_loss_total += loss.item()
-
-        # === Validation
+    scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=patience // 2 if patience > 0 else 5)
+    no_improve_val_epochs = 0
+    
+    #  计算每个病人在全局序列中的起始位置，包含病人的 固定索引
+    patient_start_offset_global_dict = build_patient_start_offset_dict(train_loader_for_p)
+    print("[Joint] Calculating  patient_start_offset_global (once before training)...")
+    
+    all_lengths_for_offset_init = [] #收集所有病人的序列的长度，顺序与 train_loader_for_p 中的 patient_id 顺序一致
+    with torch.no_grad():
+        for _, _,_, _,_, lengths_p_init, _, _,_ in tqdm(train_loader_for_p, desc="[Joint Init] Collecting lengths", leave=False):
+            all_lengths_for_offset_init.extend(lengths_p_init.cpu().tolist())
+            
+    current_offset = 0
+    patient_start_offset_list_global = [0] # 存储每个病人序列在全局序列中的起始位置
+    for l_init in all_lengths_for_offset_init:
+        patient_start_offset_list_global.append(current_offset + l_init)
+        current_offset += l_init
+        
+    patient_start_offset_global = torch.tensor(patient_start_offset_list_global[:-1], dtype=torch.long, device=device)
+    print(f"[Joint]  patient_start_offset_global calculated. Shape: {patient_start_offset_global.shape}")
+    
+    
+    p_target_train_global_flat_current_epoch = None
+    for ep in range(1, epochs):
+        
+        #周期性更新 全局的 P_target
+        if ep % update_P_every_n_epochs == 0:
+            print(f"[Joint] Ep{ep+1}: Calculating global target P...")
+        
         model.eval()
-        val_loss_total = 0
-        all_losses = []
-        all_categories = []
-
+        all_q_list_for_p_epoch = [] # 每个有效时间步对som节点的q值。 soft assignment
         with torch.no_grad():
-            for batch in val_loader:
-                _, flat_data, ts_data, graph_data,risk_data, lengths, risk_category, mortality_labels = batch
-                flat_data = flat_data.to(device)
-                ts_data = ts_data.to(device)
+            for _,flat_data,ts_data, graph_data,_, ts_lengths, _, _,_ in tqdm(train_loader_for_p, desc=f"[Joint E{ep+1}] Calc Global P", leave=False):
+                flat_data, ts_data, ts_lengths = flat_data.to(device), ts_data.to(device), ts_lengths.to(device)
                 graph_data = graph_data.to(device)
-                risk_data = risk_data.to(device)
-                lengths = lengths.to(device)
-                risk_category = risk_category.to(device)
-                mortality_labels = mortality_labels.to(device)
+                
+                outputs = model(flat_data, graph_data, ts_data,ts_lengths)
+                
+                _, mask_p_flat_bool = model.generate_mask(ts_data.size(1), ts_lengths)
+                
+                q_for_p_batch_valid = outputs["aux_info"]["q"][mask_p_flat_bool]
+                               
+                all_q_list_for_p_epoch.append(q_for_p_batch_valid.cpu())
+        
+        q_train_all_valid_timesteps_epoch = torch.cat(all_q_list_for_p_epoch, dim=0)
+        p_target_train_global_flat_current_epoch = model.compute_target_distribution_p(q_train_all_valid_timesteps_epoch).to(device)
+        if ep+1 % 10 == 0:
+              print(f"[Joint] Ep{ep+1} Global P updated. Shape: {p_target_train_global_flat_current_epoch.shape}")
+                   
+        
+        model.train()
+        current_epoch_losses = {key: 0.0 for key in history if 'train_' in key}
+        for _,flat_data,ts_data, graph_data ,risk, ts_lengths,categories, mortality, original_indices in train_loader:
+            
+            flat_data, ts_data, ts_lengths = flat_data.to(device), ts_data.to(device), ts_lengths.to(device)
+            graph_data = graph_data.to(device)
+            
+            y_risk_true, y_mortality_true =risk.to(device),mortality.to(device)
+            
+            original_indices = original_indices.to(device)
+             
+            B_actual, T_actual_max, D_input = ts_data.shape
+            mask_seq, mask_flat_bool = model.generate_mask(T_actual_max, ts_lengths)
+            
+            p_batch_target_list = [] # 当前batch中每个病人有效时间步的 目标分布
+            if p_target_train_global_flat_current_epoch is not None:
+                for i in range(B_actual):
+                    orig_idx = original_indices[i].item() # 当前病人的原始索引
+                    len_actual = ts_lengths[i].item() # 当前病人的实际长度
+                    start_idx = patient_start_offset_global_dict.get(orig_idx, None) # 查找病人在全局序列中的起始位置
+                    if start_idx is None:
+                        raise ValueError(f"Patient idx {orig_idx} not found in offset dict!")
+                    end_idx = start_idx + len_actual 
+                    p_patient_valid = p_target_train_global_flat_current_epoch[start_idx:end_idx] # 该病人的有效时间步目标分布
+                    p_batch_target_list.append(p_patient_valid) 
+                p_batch_target_valid_timesteps = torch.cat(p_batch_target_list, dim=0) # 得到当前batch中所有病人有效时间步的目标分布
+            else:
+                num_valid_steps = mask_flat_bool.sum().item()
+                p_batch_target_valid_timesteps = torch.ones(num_valid_steps, model.som_layer.n_nodes, device=device) / model.som_layer.n_nodes
+                
+            optimizer.zero_grad()
+            
+            output = model(flat_data, graph_data, ts_data, ts_lengths)
+            
+            _, mask_p_flat = model.generate_mask(ts_data.size(1), ts_lengths)
+            
+            q_for_p_batch_valid  = outputs["aux_info"]["q"][mask_p_flat]
+            q_soft_flat_valid    = outputs["aux_info"]["q"][mask_p_flat]
+            q_soft_flat_ng_valid = outputs["aux_info"]["q_ng"][mask_p_flat]
+            
+            if p_batch_target_valid_timesteps.shape[0] != q_soft_flat_valid.shape[0]:
+                print(f"Warning: P-Q mismatch, falling back to uniform P.")
+                num_valid_steps = q_soft_flat_valid.shape[0]
+                p_batch_target_valid_timesteps = torch.ones(num_valid_steps, model.som_layer.n_nodes, device=device) / model.som_layer.n_nodes
+                           
+            
+            
+            loss_cah = model.compute_loss_commit_cah(p_batch_target_valid_timesteps, q_soft_flat_valid)  
+            
+            loss_s_som = model.compute_loss_s_som(q_soft_flat_valid, q_soft_flat_ng_valid)
+             
+            
+            z_e_sample_seq = outputs["combine_emb"]
+            bmu_indices_flat = outputs["aux_info"]["bmu_indices_flat"] # shape: (B*T_max,)
+            loss_smooth = model.compute_loss_smoothness(
+              z_e_sample_seq, bmu_indices_flat, model.alpha_som_q, mask_seq)
+            
+            ## ===1. prediction loss
+            risk_scores_pred = outputs["risk_scores"] # (B, T)
+            mask_seq_risk_bool, _ = model.generate_mask(ts_data.size(1), ts_lengths)
+            mask_seq_risk = mask_seq_risk_bool.float()
+            loss_risk_elementwise = bce_loss_fn(risk_scores_pred, y_risk_true) # (B, T)
+            loss_risk = (loss_risk_elementwise * mask_seq_risk).sum() / mask_seq_risk.sum().clamp(min=1) 
+            ## ===2. mortality prediction loss
+            mortality_prob_pred = outputs["mortality_prob"] # (B, 1) or (B)
+            loss_mortality = F.binary_cross_entropy(mortality_prob_pred.squeeze(-1), y_mortality_true.float())
 
-                pred, _, _, _, mortality_prob,_, _  = model(flat_data, graph_data, ts_data, lengths)
 
+            total_loss = theta * loss_risk + gamma * loss_cah + beta * loss_s_som + kappa * loss_smooth + eta * loss_mortality
+            total_loss.backward()
+            optimizer.step()
 
-                val_loss, _, batch_losses = compute_risk_loss(pred, risk_data, lengths, risk_category,mortality_prob,mortality_labels)
+            current_epoch_losses['train_loss'] += total_loss.item()
+            current_epoch_losses['train_risk'] += loss_risk.item()
+            current_epoch_losses['train_cah'] += loss_cah.item()
+            current_epoch_losses['train_s_som'] += loss_s_som.item()
+            current_epoch_losses['train_smooth'] += loss_smooth.item()
+            current_epoch_losses['train_mortality'] += loss_mortality.item()
 
-                val_loss_total += val_loss.item()
-                all_losses.extend(batch_losses.cpu().tolist())
-                all_categories.extend(risk_category.cpu().tolist())
+        for key in current_epoch_losses:
+            history[key].append(current_epoch_losses[key] / len(train_loader))
 
-        train_loss = train_loss_total / len(train_loader)
-        val_loss = val_loss_total / len(val_loader)
+        model.eval()
+        total_epoch_loss_val = 0.0
+        per_patient_losses = []
+        per_patient_cats = []
+        with torch.no_grad():
+            for _,flat_data,ts_data, graph_data ,risk, ts_lengths,categories, mortality, original_indices in val_loader:
+                
+                flat_data, ts_data, ts_lengths = flat_data.to(device), ts_data.to(device), ts_lengths.to(device)
+                graph_data = graph_data.to(device)
+                
+                y_risk_true, y_mortality_true =risk.to(device),mortality.to(device)
+                
+                
+                output_val = model(flat_data, graph_data, ts_data, ts_lengths)
+            
+                # === 1. prediction loss
+                risk_scores_pred = output_val["risk_scores"] # (B, T)
+                mask_seq_risk_bool, _ = model.generate_mask(ts_data.size(1), ts_lengths)
+                mask_seq_risk = mask_seq_risk_bool.float()
+                
+                loss_risk_elementwise = bce_loss_fn(risk_scores_pred, y_risk_true) # (B, T)
+                loss_risk = (loss_risk_elementwise * mask_seq_risk).sum() / mask_seq_risk.sum().clamp(min=1) 
+                # per risk
+                per_risk = (loss_risk_elementwise * mask_seq_risk).sum(dim=1) / mask_seq_risk.sum(dim=1).clamp(min=1)
+                
+                
+                ## ===2. mortality prediction loss
+                mortality_prob_pred = output_val["mortality_prob"] # (B, 1) or (B)
+                loss_mortality_el = F.binary_cross_entropy(mortality_prob_pred.squeeze(-1), y_mortality_true.float())
+                loss_mortality = (loss_mortality_el* mask_seq_risk).sum() / mask_seq_risk.sum().clamp(min=1) 
+                
+                # per mortality
+                per_mort = (loss_mortality * mask_seq_risk).sum(dim=1) / mask_seq_risk.sum(dim=1).clamp(min=1)
+                 
+                total_epoch_loss_val += (loss_risk + loss_mortality).item()
+                per_patient_losses += (per_risk + per_mort).cpu().tolist()
+                per_patient_cats   += categories.cpu().tolist()
+                
+                    
 
-        history['train'].append(train_loss)
-        history['val'].append(val_loss)
-
-        # === Per-category analysis
-        cat_loss_record = {}
+        avg_val_loss = total_epoch_loss_val / len(val_loader)
+        history['val_loss'].append(avg_val_loss)
+        
+        hist_cat = {}
+        losses_t = torch.tensor(per_patient_losses)
+        cats_t   = torch.tensor(per_patient_cats)
         for i in range(4):
-            cls_losses = [l for l, c in zip(all_losses, all_categories) if c == i]
-            cat_loss_record[i] = float(np.mean(cls_losses)) if cls_losses else None
-        history['category'].append(cat_loss_record)
+           sel = cats_t == i
+           if sel.any():
+                group = losses_t[sel]
+                hist_cat[i] = (group.mean().item(), int(sel.sum().item()))
+                
+        history['cat'].append(hist_cat)
+        scheduler.step(avg_val_loss)
 
-        if epoch % 10 == 0:
-            print(f"Epoch {epoch}: Train {train_loss:.4f}, Val {val_loss:.4f}")
+        if avg_val_loss < best_val_loss:
+            best_val_loss = avg_val_loss
+            best_model_wts = copy.deepcopy(model.state_dict())
+            torch.save(best_model_wts, os.path.join(save_dir, 'best_joint.pth'))
+            no_improve_val_epochs = 0
+        else:
+            no_improve_val_epochs += 1
 
-        if stopper.step(val_loss, model):
-            print("Early stopping triggered.")
+        if patience > 0 and no_improve_val_epochs >= patience:
+            print(f"[Joint] Early stopping at epoch {ep + 1} due to no improvement for {patience} epochs.")
             break
 
-    stopper.restore_best(model)
-    torch.save(model.state_dict(), save_path)
+    if os.path.exists(os.path.join(save_dir, 'best_joint.pth')):
+        print("[Joint] Loading best model weights.")
+        model.load_state_dict(torch.load(os.path.join(save_dir, 'best_joint.pth'),weights_only= True))
+    else:
+        print("[Joint] No best model saved. Using final model.")
 
-    with open(history_path, 'w') as f:
+    with open(os.path.join(save_dir, 'history_joint.json'), 'w') as f:
         json.dump(history, f, indent=2)
 
     return model, history
+
+            
+        
 
 
 def evaluate_model_on_test_set(model, test_loader,  device):

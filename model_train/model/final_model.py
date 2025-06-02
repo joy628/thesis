@@ -92,6 +92,7 @@ class RiskPredictor(nn.Module):
 class SOMRiskClassifier(nn.Module):
     def __init__(self, som_grid_size, num_classes):
         super().__init__()
+        ###  add layer 
         self.num_nodes = som_grid_size[0] * som_grid_size[1]
         self.fc = nn.Linear(self.num_nodes, num_classes)
 

@@ -52,12 +52,12 @@ def build_graph(df, global_node2idx):
             edge_list.append([u, v])
             edge_list.append([v, u])
 
-        # #   5.2 from roots to roots
-        # for r1, r2 in combinations(roots, 2):
-        #     u = node2idx[r1]
-        #     v = node2idx[r2]
-        #     edge_list.append([u, v])
-        #     edge_list.append([v, u])
+        #   5.2 from roots to roots
+        for r1, r2 in combinations(roots, 2):
+            u = node2idx[r1]
+            v = node2idx[r2]
+            edge_list.append([u, v])
+            edge_list.append([v, u])
             
         #   5.3 from leaves to leaves
         root_to_leaves = defaultdict(list)

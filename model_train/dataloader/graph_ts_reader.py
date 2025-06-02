@@ -57,7 +57,7 @@ class MultiModalDataset(Dataset):
         cat   = torch.tensor(category,        dtype=torch.long)
         mort  = torch.tensor(mortality_label, dtype=torch.long)
         
-        return patient_id, flat_data,ts_data, graph_data,risk_data, cat, mort
+        return patient_id, flat_data,ts_data, graph_data,risk_data, cat, mort,idx
 
     def close(self):
         self.ts_h5f.close()
@@ -65,7 +65,7 @@ class MultiModalDataset(Dataset):
  
     
 def collate_fn(batch):
-    patient_ids,  flat_list,ts_list, graphs, risk_list,category_list,mortality_labels = zip(*batch)
+    patient_ids,  flat_list,ts_list, graphs, risk_list,category_list,mortality_labels,index_list = zip(*batch)
     
     lengths = [x.shape[0] for x in ts_list]
     lengths = torch.tensor(lengths, dtype=torch.long)
@@ -77,7 +77,9 @@ def collate_fn(batch):
     flat_list = [flat_list[i] for i in sorted_idx]
     patient_ids = [patient_ids[i] for i in sorted_idx]
     category_list = [category_list[i] for i in sorted_idx]
+    
     mortality_labels = [mortality_labels[i] for i in sorted_idx]
+    index_list = [index_list[i] for i in sorted_idx]
     
     # pad sequences
     padding_value = 0
@@ -87,10 +89,12 @@ def collate_fn(batch):
     categories = torch.tensor(category_list, dtype=torch.long)
     mortality_labels = torch.tensor(mortality_labels, dtype=torch.long)
     
+    
+    original_indices = torch.tensor(index_list, dtype=torch.long)
     graphs_batch = Batch.from_data_list([graphs[i] for i in sorted_idx])
     
     
-    return patient_ids,  flat_data, padded_ts, graphs_batch ,padded_risk, lengths,categories, mortality_labels
+    return patient_ids,  flat_data, padded_ts, graphs_batch ,padded_risk, lengths,categories, mortality_labels, original_indices
 
 
 
@@ -99,29 +103,72 @@ def collate_fn(batch):
 
 class VitalSignsDataset(Dataset):
     def __init__(self, data_path):
-        self.ts_h5_file = data_path
+        
+        self.data_path = data_path
+        self.ts_h5_file = os.path.join(self.data_path, 'ts_each_patient.h5')
+        self.risks_h5_file = os.path.join(self.data_path, 'risk_each_patient.h5')
+        
+        self.ts_h5f = h5py.File(self.ts_h5_file, 'r')
+        self.risk_h5f = h5py.File(self.risks_h5_file, 'r')
+        
+        self.patient_ids = list(self.ts_h5f.keys())
 
     def __len__(self):
-        with h5py.File(self.ts_h5_file, 'r') as ts_h5f:
-            return len(ts_h5f.keys())
+        return len(self.patient_ids)
 
     def __getitem__(self, idx):
-        with h5py.File(self.ts_h5_file, 'r') as ts_h5f:
-            patient_ids = list(ts_h5f.keys())
-            patient_id = patient_ids[idx]
-            ts_data = ts_h5f[patient_id][:, 1:]  # exclude the first column which is the time
+      
+        str_pid = self.patient_ids[idx]
+        patient_id = int(str_pid) 
+        
+        ts_data = self.ts_h5f[str_pid][:, 1:]  # exclude the first column which is the time
+        risk_data = self.risk_h5f[str_pid][:] # 
+        
+        category = int(risk_data[0][5])  # discharge_risk_category
 
         ts_data = torch.tensor(ts_data, dtype=torch.float32)
-
-        return  ts_data
+        cat   = torch.tensor(category,  dtype=torch.long)
+        
+        return  ts_data,idx,cat
+    
 
 def vital_pre_train(batch):
     
-    lengths = [sample.shape[0] for sample in batch]
+    ts_list, index_list,category_list = zip(*batch)
+    
+    lengths = [x.shape[0] for x in ts_list]
     lengths = torch.tensor(lengths, dtype=torch.long)
     
-    sorted_batch = sorted(batch, key=lambda x: x.shape[0], reverse=True)
+    lengths, sorted_idx = torch.sort(lengths, descending=True)
+    ts_list = [ts_list[i] for i in sorted_idx]
+    category_list = [category_list[i] for i in sorted_idx]
+    index_list = [index_list[i] for i in sorted_idx]
+    padded_ts = pad_sequence(ts_list, batch_first=True, padding_value=0)
+    original_indices = torch.tensor(index_list, dtype=torch.long)
+    categories = torch.tensor(category_list, dtype=torch.long)
     
-    padded_ts = pad_sequence(sorted_batch, batch_first=True, padding_value=0)
+    return padded_ts, lengths, original_indices, categories
     
-    return padded_ts, lengths
+# ## sliding window for vital signs data
+# def vital_pre_train(batch, window_size=512, stride=256):
+#     ts_list, category_list = zip(*batch)
+    
+#     windows = []
+#     masks = []
+#     labels = []
+
+#     for ts, label in zip(ts_list, category_list):
+#         T, F = ts.shape
+#         for start in range(0, max(1, T - window_size + 1), stride):
+#             window = ts[start:start + window_size]
+#             pad_len = window_size - window.shape[0]
+#             if pad_len > 0:
+#                 pad = torch.zeros(pad_len, F)
+#                 window = torch.cat([window, pad], dim=0)
+#             mask = torch.cat([torch.ones(min(T - start, window_size)), torch.zeros(pad_len)], dim=0)
+#             windows.append(window)
+#             masks.append(mask)
+#             labels.append(label)
+    
+#     return torch.stack(windows), torch.stack(masks), torch.tensor(labels)
+

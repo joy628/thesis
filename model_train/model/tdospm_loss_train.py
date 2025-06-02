@@ -9,11 +9,7 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.distributions import Normal
 import math
 from tqdm import tqdm
-torch.autograd.set_detect_anomaly(True)
-from sklearn.manifold import TSNE
-import umap
-import seaborn as sns
-import pandas as pd
+import torch
 torch.autograd.set_detect_anomaly(True)
 
 
@@ -79,13 +75,12 @@ def train_vae(model, train_loader, device, optimizer, start,epochs, save_dir, pa
         
 
         # kl_weight = cyclical_kl_weight(ep, cycle_length=kl_warmup_epochs)
-        beta_value_for_kl = 0.001 # 
+        beta_value_for_kl = 2.0 # 
         if ep < kl_warmup_epochs:
             kl_weight = beta_value_for_kl * (ep / kl_warmup_epochs)
         else:
             kl_weight = beta_value_for_kl
-            
-              
+        
 
            
         total_epoch_loss = 0.0
@@ -96,7 +91,7 @@ def train_vae(model, train_loader, device, optimizer, start,epochs, save_dir, pa
             
             x_seq, lengths = x_seq.to(device), lengths.to(device)
             B, T_max, D_input = x_seq.shape
-            mask_seq, _ = model.generate_mask(T_max, lengths) # (B, T_max) and (B*T_max)
+            mask_seq, mask_flat = model.generate_mask(T_max, lengths) # (B, T_max) and (B*T_max)
             
             optimizer.zero_grad()
             
@@ -105,13 +100,14 @@ def train_vae(model, train_loader, device, optimizer, start,epochs, save_dir, pa
             check_nan_in_dist(outputs["recon_dist_flat"], "recon_dist")
             check_nan_in_dist(outputs["z_dist_flat"], "z_dist")
             
-           
+            
+            x_flat_for_loss = x_seq.reshape(B * T_max, D_input) 
             loss_elbo, recon_l, kl_l = model.compute_loss_reconstruction_ze(
-                x_seq,       
+                x_flat_for_loss,       
                 outputs["recon_dist_flat"],   
                 outputs["z_dist_flat"],       
                 kl_weight, # Annealed KL weight for VAE loss
-                mask_seq                     
+                mask_flat                     
             )
             
             loss_elbo.backward()
@@ -139,8 +135,8 @@ def train_vae(model, train_loader, device, optimizer, start,epochs, save_dir, pa
         history['Epoch_ELBO'].append(avg_epoch_loss)
         history['Epoch_Recon'].append(avg_epoch_recon)
         history['Epoch_KL'].append(avg_epoch_kl_weighted)
-        if (ep+1) % 10 == 0 or (ep+1) == epochs:
-           print(f"[Epoch {ep}] KL weight: {kl_weight:.4f}, KL: {avg_epoch_kl_weighted:.4f}")
+        
+        print(f"[Epoch {ep}] KL weight: {kl_weight:.4f}, KL: {avg_epoch_kl_weighted:.4f}")
         
         scheduler.step(avg_epoch_loss)
 
@@ -208,20 +204,17 @@ def train_som(  model,  train_loader,  device,  max_epochs: int, save_dir: str,p
                 
                 with torch.no_grad(): # Get z_e from frozen VAE encoder
                     outputs_vae = model(x_seq, lengths, is_training=False) #
-                    z_e_sample = outputs_vae["z_e_sample_seq"]  # shape: [B, T, D]
-                    _, mask_flat_bool = model.generate_mask(T_max, lengths)  # [B, T] and [B*T]
-                    z_e_sample_flat = z_e_sample.reshape(B * T_max, -1)  # [B*T, D]
-                    valid_z_e_detached = z_e_sample_flat[mask_flat_bool].detach()
+                    z_e_sample_flat_detached = outputs_vae["z_e_sample_flat"].detach() 
                 
               #  Get BMU and neighbors (these ops are on SOM embeddings, which are trainable)
 
-                z_to_som_dist_sq_flat_valid = model.som_layer.get_distances_flat(valid_z_e_detached)
-                bmu_indices_flat_valid = model.som_layer.get_bmu_indices(z_to_som_dist_sq_flat_valid)
-                z_q_flat_valid = model.som_layer.get_z_q(bmu_indices_flat_valid)
-                z_q_neighbors_stacked_valid = model.som_layer.get_z_q_neighbors_fixed(bmu_indices_flat_valid)
-                loss_commit = model.compute_loss_commit_sd_pretrain(valid_z_e_detached, z_q_flat_valid)
-                loss_neighbor = model.compute_loss_som_old_pretrain(valid_z_e_detached, z_q_neighbors_stacked_valid)
+                z_to_som_dist_sq_flat = model.som_layer.get_distances_flat(z_e_sample_flat_detached)
+                bmu_indices_flat = model.som_layer.get_bmu_indices(z_to_som_dist_sq_flat)
+                z_q_flat = model.som_layer.get_z_q(bmu_indices_flat)
+                z_q_neighbors_stacked = model.som_layer.get_z_q_neighbors_fixed(bmu_indices_flat)
                 
+                loss_commit = model.compute_loss_commit_sd_pretrain(z_e_sample_flat_detached, z_q_flat)
+                loss_neighbor = model.compute_loss_som_old_pretrain(z_e_sample_flat_detached, z_q_neighbors_stacked)
                 loss_som_total_pre = loss_commit + loss_neighbor
                 
                 loss_som_total_pre.backward()
@@ -285,7 +278,7 @@ def train_joint(model, train_loader, val_loader, train_loader_for_p, device, opt
 
     
     ### 1. 初始化与 patient 偏移量计算
-    print("[Joint] Calculating  patient_start_offset_global (once before training)...")
+    print("[Joint] Calculating fixed patient_start_offset_global (once before training)...")
     all_lengths_for_offset_init = []
     with torch.no_grad():
         for _, lengths_p_init, _, _ in tqdm(train_loader_for_p, desc="[Joint Init] Collecting lengths", leave=False):
@@ -297,7 +290,7 @@ def train_joint(model, train_loader, val_loader, train_loader_for_p, device, opt
         patient_start_offset_list_global.append(current_offset + l_init)
         current_offset += l_init
     patient_start_offset_global = torch.tensor(patient_start_offset_list_global[:-1], dtype=torch.long, device=device)
-    print(f"[Joint]  patient_start_offset_global calculated. Shape: {patient_start_offset_global.shape}")
+    print(f"[Joint] Fixed patient_start_offset_global calculated. Shape: {patient_start_offset_global.shape}")
 
 
     # 2. 
@@ -332,7 +325,7 @@ def train_joint(model, train_loader, val_loader, train_loader_for_p, device, opt
             x_seq, lengths = x_seq.to(device), lengths.to(device)
             original_indices_batch = original_indices_batch.to(device)
             B_actual, T_actual_max, D_input = x_seq.shape
-            mask_seq, mask_flat_bool = model.generate_mask(T_actual_max, lengths)
+            _, mask_flat_bool = model.generate_mask(T_actual_max, lengths)
 
             p_batch_target_list = []
             if p_target_train_global_flat_current_epoch is not None:
@@ -351,9 +344,7 @@ def train_joint(model, train_loader, val_loader, train_loader_for_p, device, opt
                 p_batch_target_valid_timesteps = torch.ones(num_valid_steps, model.som_layer.n_nodes, device=device) / model.som_layer.n_nodes
 
             optimizer.zero_grad()
-            
             outputs = model(x_seq, lengths, is_training=True)
-            
             q_soft_flat_valid = outputs["q_soft_flat"][mask_flat_bool]
             q_soft_flat_ng_valid = outputs["q_soft_flat_ng"][mask_flat_bool]
 
@@ -361,27 +352,15 @@ def train_joint(model, train_loader, val_loader, train_loader_for_p, device, opt
                 print(f"Warning: P-Q mismatch, falling back to uniform P.")
                 num_valid_steps = q_soft_flat_valid.shape[0]
                 p_batch_target_valid_timesteps = torch.ones(num_valid_steps, model.som_layer.n_nodes, device=device) / model.som_layer.n_nodes
-                
-    
+
+            x_flat_for_loss = x_seq.reshape(B_actual * T_actual_max, D_input)
             loss_elbo, recon_l, kl_l = model.compute_loss_reconstruction_ze(
-                x_seq, outputs["recon_dist_flat"], outputs["z_dist_flat"], kl_weight, mask_seq
+                x_flat_for_loss, outputs["recon_dist_flat"], outputs["z_dist_flat"], kl_weight, mask_flat_bool.float()
             )
-            
             loss_cah = model.compute_loss_commit_cah(p_batch_target_valid_timesteps, q_soft_flat_valid)
-            
             loss_s_som = model.compute_loss_s_som(q_soft_flat_valid, q_soft_flat_ng_valid)
-            
-            z_e_sample_seq = outputs["z_e_sample_seq"]
-
-            bmu_indices_flat = outputs["bmu_indices_flat_for_smooth"] # shape: (B*T_max,)
-
-            loss_smooth = model.compute_loss_smoothness(
-              z_e_sample_seq, bmu_indices_flat, model.alpha_som_q, mask_seq
-)
-            pred_z_dist_flat = outputs["pred_z_dist_flat"]
-            
-
-            loss_pred = model.compute_loss_prediction(pred_z_dist_flat, outputs["z_e_sample_seq"], mask_seq)
+            loss_smooth = model.compute_loss_smoothness(outputs["z_e_sample_seq"], outputs["bmu_indices_flat_for_smooth"], model.alpha_som_q, mask_flat_bool.float())
+            loss_pred = model.compute_loss_prediction(outputs["pred_z_dist_flat"], outputs["z_e_sample_seq"], mask_flat_bool.float())
 
             total_loss = theta * loss_elbo + gamma * loss_cah + beta * loss_s_som + kappa * loss_smooth + eta * loss_pred
             total_loss.backward()
@@ -405,19 +384,12 @@ def train_joint(model, train_loader, val_loader, train_loader_for_p, device, opt
             for x_seq_val, lengths_val, _, _ in val_loader:
                 x_seq_val, lengths_val = x_seq_val.to(device), lengths_val.to(device)
                 B_val, T_val_max, D_input = x_seq_val.shape
-                mask_seq, mask_flat_val = model.generate_mask(T_val_max, lengths_val)
+                _, mask_flat_val = model.generate_mask(T_val_max, lengths_val)
                 outputs_val = model(x_seq_val, lengths_val, is_training=False)
-                x_flat_for_loss_val = x_seq_val
-                loss_elbo_val, _, _ = model.compute_loss_reconstruction_ze(x_flat_for_loss_val, outputs_val["recon_dist_flat"], outputs_val["z_dist_flat"], kl_weight, mask_seq)
-                
-                loss_smooth_val = model.compute_loss_smoothness(outputs_val["z_e_sample_seq"], outputs_val["bmu_indices_flat_for_smooth"], model.alpha_som_q, mask_seq)
-                
-                
-                pred_z_dist_flat = outputs_val["pred_z_dist_flat"]
-    
-                
-                loss_pred_val = model.compute_loss_prediction( pred_z_dist_flat, outputs_val["z_e_sample_seq"], mask_seq)
-                
+                x_flat_for_loss_val = x_seq_val.reshape(B_val * T_val_max, D_input)
+                loss_elbo_val, _, _ = model.compute_loss_reconstruction_ze(x_flat_for_loss_val, outputs_val["recon_dist_flat"], outputs_val["z_dist_flat"], kl_weight, mask_flat_val.float())
+                loss_smooth_val = model.compute_loss_smoothness(outputs_val["z_e_sample_seq"], outputs_val["bmu_indices_flat_for_smooth"], model.alpha_som_q, mask_flat_val.float())
+                loss_pred_val = model.compute_loss_prediction(outputs_val["pred_z_dist_flat"], outputs_val["z_e_sample_seq"], mask_flat_val.float())
                 total_epoch_loss_val += (loss_elbo_val + loss_smooth_val + loss_pred_val).item()
 
         avg_val_loss = total_epoch_loss_val / len(val_loader)
@@ -448,35 +420,98 @@ def train_joint(model, train_loader, val_loader, train_loader_for_p, device, opt
     return model, history
 
 
-# ===========================
+
+
+
+
+def train_prediction(  model, train_loader, device,  start_epoch: int, max_epochs: int,  save_dir: str, lr: float, patience: int = 10
+):
+    os.makedirs(save_dir, exist_ok=True)
+    
+    freeze_all(model)
+    unfreeze_module(model.lstm_predictor)
+
+    model.train()
+
+    # **重新新建 optimizer**，只给预测器
+    optimizer = torch.optim.Adam(
+        filter(lambda p: p.requires_grad, model.parameters()),
+        lr=lr
+    )
+
+    best_loss = float("inf")
+    best_wts  = copy.deepcopy(model.state_dict())
+    scheduler = ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=patience)
+    history = []
+    no_imp = 0
+
+    for ep in range(start_epoch, max_epochs):
+        epoch_loss = 0.0
+        for x, lengths,_ in train_loader:
+            x, lengths = x.to(device), lengths.to(device)
+
+            out = model(x,lengths)
+            z_seq = out['z_seq'].detach()
+            pred_z = model.predict_next(z_seq,lengths)
+            out_pred = model(x,is_training=False, use_lstm=True, predicted_next_z_e=pred_z.reshape(-1, pred_z.shape[-1]))
+            loss = loss_prediction(out_pred['x_hat'].view(z_seq.shape[0], -1, z_seq.shape[-1])[:, 1:], z_seq[:, 1:], lengths)
+
+            # 4) 反向 + 更新
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+            epoch_loss += loss.item()
+
+        avg = epoch_loss / len(train_loader)
+        history.append(avg)
+        scheduler.step(avg)
+
+        # early stopping & 保存
+        if avg < best_loss:
+            best_loss = avg
+            best_wts  = copy.deepcopy(model.state_dict())
+            torch.save(best_wts, os.path.join(save_dir, "best_pred.pth"))
+            no_imp = 0
+        else:
+            no_imp += 1
+            if no_imp >= patience:
+                print(f"[Predict] Early stopping @ epoch {ep+1}")
+                break
+        if (ep+1) % 10 == 0 or (ep+1) == max_epochs:
+            print(f"[Predict] Epoch {ep+1}/{max_epochs} Loss={avg:.4f}")
+
+    # 恢复最优
+    model.load_state_dict(best_wts)
+    # 存 history
+    with open(os.path.join(save_dir, "history_pred.json"), "w") as f:
+        json.dump(history, f, indent=2)
+
+    return model, history 
+
 
 
 def initialize_som_from_data(model, dataloader, device, som_dim, num_classes, samples_per_class):
-    """
-    从 dataloader 中按类别采样，初始化 SOM 的 embeddings。
-    DataLoader 输出顺序: x, lengths, id, label
-    """
     model.eval()
     H, W = som_dim
     N = H * W
-    assert N == num_classes * samples_per_class, f"SOM 网格大小 {N} 必须等于 num_classes * samples_per_class"
+    assert N == num_classes * samples_per_class
 
     latent_vectors = []
     class_counts = {k: 0 for k in range(num_classes)}
 
     with torch.no_grad():
-        for x, lengths, _, labels in dataloader:  # 注意：第三项是 id，最后是 label
+        for x, lengths, labels in dataloader:
             x, lengths, labels = x.to(device), lengths.to(device), labels.to(device)
-            out = model(x, lengths, is_training=False)
-
-            z_seq = out['z_e_sample_seq']  # [B, T, D]
+            out = model(x, lengths)
+            z_seq = out['z_e']  # [B, T, D]
 
             for i in range(x.size(0)):
                 label = labels[i].item()
                 if class_counts[label] >= samples_per_class:
                     continue
                 L = lengths[i].item()
-                z_avg = z_seq[i, :L].mean(dim=0)  # 平均池化每个样本的 z 序列
+                z_avg = z_seq[i, :L].mean(dim=0)
                 latent_vectors.append(z_avg)
                 class_counts[label] += 1
 
@@ -485,151 +520,292 @@ def initialize_som_from_data(model, dataloader, device, som_dim, num_classes, sa
             if sum(class_counts.values()) >= N:
                 break
 
-    latent_matrix = torch.stack(latent_vectors)  # shape: [N, D_latent]
-    model.som_layer.embeddings.data.copy_(latent_matrix)
-    print(f"[SOM Init] initialize SOM embeddings：{N} vectors, each class has {samples_per_class}。")
-    
-    
+    # Check collected vector count
+    if len(latent_vectors) != N:
+        raise ValueError(f"未收集到足够样本！收集到 {len(latent_vectors)} 个，目标是 {N} 个")
+
+    latent_matrix = torch.stack(latent_vectors)  # [H*W, D]
+    model.som.embeddings.data.copy_(latent_matrix)
+    print(f"[SOM Init] SOM embeddings initialized with {N} category-balanced samples.")
 
 
-def collect_latents(model, data_loader, device, max_batches=20):
+def initialize_som_from_data(model, dataloader, device, som_dim, num_classes, samples_per_class):
+    """
+    Initialize SOM embeddings using VAE latent vectors averaged from selected samples per class.
+
+    Args:
+        model: TSAutoencoder with trained encoder and SOMLayer.
+        dataloader: Yields (x_seq, lengths, labels), labels are class indices.
+        device: CUDA/CPU device.
+        som_dim: Tuple[int, int], (H, W) size of SOM.
+        num_classes: Number of distinct classes.
+        samples_per_class: Number of patients to use per class.
+    """
     model.eval()
-    zs, ys = [], []
+    H, W = som_dim
+    N = H * W
+    assert N == num_classes * samples_per_class, f"SOM size {N} must equal num_classes * samples_per_class"
+
+    latent_vectors = []
+    class_counts = {k: 0 for k in range(num_classes)}
+    latent_dim = model.latent_dim
+
     with torch.no_grad():
-        for i, (x, lengths, _,labels) in enumerate(data_loader):
-            if i >= max_batches: break
+        for x, lengths, _,labels in dataloader:
             x = x.to(device)
             lengths = lengths.to(device)
             labels = labels.to(device)
 
-            out = model(x, lengths, is_training=False)
-            z_mu = out["z_dist_flat"].mean  # shape: (B, T, D)
-            B, T, D = z_mu.shape
+            B, T, D = x.shape
+            x_flat = x.view(B * T, D)
+            z_dist_flat = model.encoder(x_flat)
+            z_e_flat = z_dist_flat.mean  # (B*T, latent_dim)
+            z_e_seq = z_e_flat.view(B, T, latent_dim)  # (B, T, latent_dim)
 
-            for b in range(B):
-                valid_len = lengths[b]
-                zs.append(z_mu[b, :valid_len].cpu())  # (valid_len, D)
-                ys.append(labels[b].repeat(valid_len).cpu())  # (valid_len,)
+            for i in range(B):
+                label = labels[i].item()
+                if class_counts[label] >= samples_per_class:
+                    continue
+
+                L = lengths[i].item()
+                z_avg = z_e_seq[i, :L].mean(dim=0)  # (latent_dim,)
+                latent_vectors.append(z_avg)
+                class_counts[label] += 1
+
+                if sum(class_counts.values()) >= N:
+                    break
+            if sum(class_counts.values()) >= N:
+                break
+
+    if len(latent_vectors) != N:
+        raise ValueError(f"Only collected {len(latent_vectors)} samples, expected {N}.")
+
+    # Stack and assign to SOM embeddings
+    z_init = torch.stack(latent_vectors, dim=0).to(device)  # Shape: (H*W, latent_dim)
+    model.som_layer.embeddings.data.copy_(z_init)
+
+    print(f" Initialized SOM with {N} embeddings ({num_classes} classes with {samples_per_class} samples)")
     
-    z_all = torch.cat(zs, dim=0).numpy()
-    y_all = torch.cat(ys, dim=0).numpy()
-    print(f"z_all shape: {z_all.shape}")  # 应该是 [N, latent_dim]
-    print(f"y_all shape: {y_all.shape}")  # 应该是 [N]
-    return z_all, y_all
-
-
-def plot_tsne(z_all, y_all, perplexity=15):
-    tsne = TSNE(n_components=2, perplexity=perplexity, init='pca', random_state=42)
-    z_2d = tsne.fit_transform(z_all)
-
-    plt.figure(figsize=(8, 6))
-    sns.scatterplot(x=z_2d[:,0], y=z_2d[:,1], hue=y_all, palette="tab10", s=15, alpha=0.7)
-    plt.title("t-SNE Visualization of Latent Space")
-    plt.xlabel("z[0]"); plt.ylabel("z[1]")
-    plt.legend(title="Label", bbox_to_anchor=(1.05, 1), loc='upper left')
-    plt.tight_layout()
-    plt.show()
     
+import torch
+import matplotlib.pyplot as plt
+from sklearn.manifold import TSNE
+from sklearn.decomposition import PCA
+import seaborn as sns # For prettier plots
+import pandas as pd
+import numpy as np
 
+def visualize_latent_space(model, data_loader, device, num_samples_to_plot=50, use_tsne=True, perplexity_tsne=30, labels_available=False, save_path=None):
+    """
+    可视化 VAE 潜空间的分布。
 
-def plot_umap(z_all, y_all, n_neighbors=15, min_dist=0.1, metric='euclidean'):
-    reducer = umap.UMAP(
-        n_neighbors=n_neighbors,
-        min_dist=min_dist,
-        metric=metric,
-        random_state=42
-    )
-    z_2d = reducer.fit_transform(z_all)
-
-    df = pd.DataFrame({
-        "x": z_2d[:, 0],
-        "y": z_2d[:, 1],
-        "label": y_all
-    })
-
-    plt.figure(figsize=(8, 6))
-    sns.scatterplot(data=df, x="x", y="y", hue="label", palette="tab10", s=15, alpha=0.7)
-    plt.title("UMAP Visualization of Latent Space")
-    plt.xlabel("UMAP-1")
-    plt.ylabel("UMAP-2")
-    plt.legend(title="Label")
-    plt.tight_layout()
-    plt.show()    
-
-    
-def analyze_latent_stats(model, data_loader, device, num_batches_to_analyze=20):
+    Args:
+        model: 训练好的 VAE 模型 (TSAutoencoder 实例)。
+        data_loader: DataLoader，提供数据。
+        device: "cuda" 或 "cpu"。
+        num_samples_to_plot: 要绘制的样本数量。
+        use_tsne: 是否使用 t-SNE (True) 或 PCA (False) 进行降维。
+        perplexity_tsne: t-SNE 的 perplexity 参数。
+        labels_available: 数据中是否有类别标签可用于着色。
+                           假设 DataLoader 返回 (x, lengths, original_labels_or_indices)
+                           如果 labels_available=True, 假设 original_labels_or_indices 是类别标签。
+        save_path: 保存图像的路径。
+    """
     model.eval()
-    all_mus = []
-    all_logvars = []
-    all_kls_per_sample = []
+    all_z_means = []
+    all_labels = [] # 如果有标签
+    count = 0
 
+    print(f"Extracting latent representations for {num_samples_to_plot} samples...")
     with torch.no_grad():
-        for batch_idx, (x_seq_batch, lengths_batch, _, _) in enumerate(data_loader):
-            if batch_idx >= num_batches_to_analyze:
+        for x_seq_batch, lengths_batch, _ ,other_info_batch  in data_loader:
+            if count >= num_samples_to_plot:
                 break
 
             x_seq_batch = x_seq_batch.to(device)
             lengths_batch = lengths_batch.to(device)
+            B, T_max, D_input = x_seq_batch.shape
 
-            outputs = model(x_seq_batch, lengths_batch, is_training=False)
-            z_dist = outputs["z_dist_flat"]  # Shape: (B, T, D)
-            z_mu = z_dist.mean
-            z_logvar = z_dist.stddev.pow(2).log()
+            # 我们只取每个序列的第一个时间步的潜表示作为示例
+            # 或者你可以对整个序列的潜表示取平均，或者选择特定的时间步
+            x_for_encoder_flat = x_seq_batch[:, 0, :].reshape(B, D_input) # (B, D_input)
 
-            # 计算 KL 散度 (q(z|x) || N(0, I))
+            z_dist_flat = model.encoder(x_for_encoder_flat)
+            z_mean_batch = z_dist_flat.mean.cpu() # (B, latent_dim)
+            all_z_means.append(z_mean_batch)
+
+            if labels_available:
+                # 假设 other_info_batch 是标签，或者可以从中提取标签
+                # 你可能需要根据你的数据调整这部分
+                if isinstance(other_info_batch, torch.Tensor):
+                    labels_batch = other_info_batch.cpu()
+                    # 如果标签是针对每个时间步的，也只取第一个时间步的
+                    if labels_batch.ndim > 1 and labels_batch.shape[0] == B : # e.g. (B, T_label_dims)
+                         all_labels.append(labels_batch[:,0] if labels_batch.shape[1] > 0 else labels_batch) # 取第一个时间步的标签
+                    else: # (B, label_dims) or (B,)
+                        all_labels.append(labels_batch)
+                else: # 如果是列表或其他格式
+                    try:
+                        all_labels.extend(list(other_info_batch[:B].numpy())) # 假设是numpy数组
+                    except:
+                        print("Warning: Could not process labels for visualization.")
+
+
+            count += z_mean_batch.shape[0]
+            if count >= num_samples_to_plot:
+                break
+    
+    if not all_z_means:
+        print("No latent representations extracted.")
+        return
+
+    latent_vectors = torch.cat(all_z_means, dim=0)[:num_samples_to_plot]
+    
+    if labels_available and all_labels:
+        true_labels = torch.cat(all_labels, dim=0)[:num_samples_to_plot]
+        if true_labels.ndim > 1 and true_labels.shape[1] > 1: # 如果是多维标签，选择一个维度
+            true_labels_for_plot = true_labels[:, 0].numpy()
+            print(f"Using first dimension of labels for coloring. Unique labels found: {np.unique(true_labels_for_plot)}")
+        else:
+            true_labels_for_plot = true_labels.squeeze().numpy()
+            print(f"Using labels for coloring. Unique labels found: {np.unique(true_labels_for_plot)}")
+
+    else:
+        true_labels_for_plot = None
+        print("No labels provided for coloring.")
+
+
+    print(f"Performing dimensionality reduction on {latent_vectors.shape[0]} latent vectors...")
+    if latent_vectors.shape[1] == 2:
+        latent_2d = latent_vectors.numpy()
+        reducer_name = "Original 2D Latent"
+    elif latent_vectors.shape[1] == 3 and not use_tsne: # 如果潜空间已经是3D且不用tSNE，可以考虑3D散点图
+        print("Latent space is 3D. Consider a 3D scatter plot or PCA to 2D.")
+        # For simplicity, we'll still reduce to 2D here.
+        reducer = PCA(n_components=2)
+        latent_2d = reducer.fit_transform(latent_vectors.numpy())
+        reducer_name = "PCA to 2D"
+    elif use_tsne:
+        reducer = TSNE(n_components=2, perplexity=perplexity_tsne, random_state=42,max_iter=300, init='pca', learning_rate='auto')
+        latent_2d = reducer.fit_transform(latent_vectors.numpy())
+        reducer_name = f"t-SNE (perplexity={perplexity_tsne})"
+    else:
+        reducer = PCA(n_components=2)
+        latent_2d = reducer.fit_transform(latent_vectors.numpy())
+        reducer_name = "PCA to 2D"
+    print("Dimensionality reduction complete.")
+
+    plt.figure(figsize=(10, 8))
+    if true_labels_for_plot is not None:
+        # 使用 pandas DataFrame 和 seaborn 以获得更好的图例和调色板
+        df_latent = pd.DataFrame({'Dim1': latent_2d[:, 0], 'Dim2': latent_2d[:, 1], 'Label': true_labels_for_plot})
+        num_unique_labels = len(df_latent['Label'].unique())
+        palette = sns.color_palette("hsv", num_unique_labels) if num_unique_labels > 10 else "deep"
+        
+        sns.scatterplot(x='Dim1', y='Dim2', hue='Label', palette=palette, data=df_latent, legend='full', s=50, alpha=0.7)
+        plt.legend(title='Label', bbox_to_anchor=(1.05, 1), loc='upper left')
+    else:
+        plt.scatter(latent_2d[:, 0], latent_2d[:, 1], s=50, alpha=0.5)
+    
+    plt.title(f"VAE Latent Space Visualization ({reducer_name})")
+    plt.xlabel("Dimension 1")
+    plt.ylabel("Dimension 2")
+    plt.grid(True, linestyle=':', alpha=0.6)
+    plt.tight_layout(rect=[0, 0, 0.85, 1] if true_labels_for_plot is not None else None) # 为图例留空间
+    
+    if save_path:
+        plt.savefig(save_path)
+        print(f"Latent space visualization saved to {save_path}")
+    plt.show()
+    
+    
+def analyze_latent_stats(model, data_loader, device, num_batches_to_analyze=10):
+    model.eval()
+    all_mus = []
+    all_logvars = []
+    all_kls_per_sample = [] # 如果你想计算每个样本的KL
+
+    print(f"Analyzing latent statistics for {num_batches_to_analyze} batches...")
+    with torch.no_grad():
+        for i, (x_seq_batch, lengths_batch, _,_) in enumerate(data_loader):
+            if i >= num_batches_to_analyze:
+                break
+            
+            x_seq_batch = x_seq_batch.to(device)
+            lengths_batch = lengths_batch.to(device)
+            B, T_max, D_input = x_seq_batch.shape
+            
+            x_for_encoder_flat = x_seq_batch.view(B * T_max, D_input)
+            # 注意：如果序列长度不同，你需要使用掩码只处理有效时间步
+            # _, mask_flat = model.generate_mask(T_max, lengths_batch.view(-1)) # 假设 lengths_batch 也是 B*T
+            # x_for_encoder_flat_valid = x_for_encoder_flat[mask_flat]
+            # 如果 generate_mask 输入的是 (B,) 的lengths, mask_flat 就是 (B*T_max)
+            _, mask_flat_bool = model.generate_mask(T_max, lengths_batch)
+            x_for_encoder_flat_valid = x_for_encoder_flat[mask_flat_bool]
+
+
+            if x_for_encoder_flat_valid.shape[0] == 0: continue
+
+
+            z_dist_flat_valid = model.encoder(x_for_encoder_flat_valid)
+            
+            all_mus.append(z_dist_flat_valid.mean.cpu())
+            all_logvars.append(z_dist_flat_valid.variance.log().cpu()) # .variance is sigma^2, so log(sigma^2) = logvar
+
+            # 计算 KL 散度 (与标准正态先验)
             prior = torch.distributions.Independent(
                 torch.distributions.Normal(
-                    torch.zeros_like(z_mu),
-                    torch.ones_like(z_mu)
+                    torch.zeros_like(z_dist_flat_valid.mean), 
+                    torch.ones_like(z_dist_flat_valid.stddev)
                 ), 1
             )
-            kl_div = torch.distributions.kl_divergence(z_dist, prior)  # (B, T)
+            kl_div_batch = torch.distributions.kl_divergence(z_dist_flat_valid, prior) # (num_valid_steps_in_batch,)
+            all_kls_per_sample.append(kl_div_batch.cpu())
 
-            for b in range(x_seq_batch.size(0)):
-                T = lengths_batch[b].item()
-                all_mus.append(z_mu[b, :T].cpu())
-                all_logvars.append(z_logvar[b, :T].cpu())
-                all_kls_per_sample.append(kl_div[b, :T].cpu())
 
     if not all_mus:
         print("No latent statistics collected.")
         return
 
-    mus_tensor = torch.cat(all_mus, dim=0)        # (Total_valid_timesteps, D)
-    logvars_tensor = torch.cat(all_logvars, dim=0)
-    kls_tensor = torch.cat(all_kls_per_sample, dim=0)
+    mus_tensor = torch.cat(all_mus, dim=0) # (Total_valid_samples, latent_dim)
+    logvars_tensor = torch.cat(all_logvars, dim=0) # (Total_valid_samples, latent_dim)
+    kls_tensor = torch.cat(all_kls_per_sample, dim=0) # (Total_valid_samples,)
 
-    # 输出统计信息
+
     print("\n--- Latent Space Statistics ---")
     print(f"Analyzed {mus_tensor.shape[0]} valid timesteps.")
-
+    
     print("\n--- mu (Mean of q(z|x)) ---")
-    print(f"  Mean (overall): {mus_tensor.mean().item():.4f}")
-    print(f"  Std (overall): {mus_tensor.std().item():.4f}")
-    print(f"  Per-dim mean:\n{mus_tensor.mean(dim=0)}")
-    print(f"  Per-dim std:\n{mus_tensor.std(dim=0)}")
+    print(f"  Mean of mu (across all samples and dims): {mus_tensor.mean().item():.4f}")
+    print(f"  Std of mu (across all samples and dims): {mus_tensor.std().item():.4f}")
+    print(f"  Mean of mu per latent dim (avg over samples):\n{mus_tensor.mean(dim=0)}")
+    print(f"  Std of mu per latent dim (avg over samples):\n{mus_tensor.std(dim=0)}")
 
-    variances_tensor = torch.exp(logvars_tensor)
-    print("\n--- Variance sigma^2 ---")
-    print(f"  Mean: {variances_tensor.mean().item():.4f}")
-    print(f"  Std: {variances_tensor.std().item():.4f}")
-    print(f"  Per-dim mean:\n{variances_tensor.mean(dim=0)}")
-
-    print("\n--- KL Divergence ---")
-    print(f"  Mean KL per timestep: {kls_tensor.mean().item():.4f}")
-    print(f"  Std KL per timestep: {kls_tensor.std().item():.4f}")
-
-    # 可视化
+    variances_tensor = torch.exp(logvars_tensor) # sigma^2
+    print("\n--- sigma^2 (Variance of q(z|x)) ---")
+    print(f"  Mean of sigma^2 (across all samples and dims): {variances_tensor.mean().item():.4f}")
+    print(f"  Std of sigma^2 (across all samples and dims): {variances_tensor.std().item():.4f}")
+    print(f"  Mean of sigma^2 per latent dim (avg over samples):\n{variances_tensor.mean(dim=0)}")
+    
+    print("\n--- KL Divergence (q(z|x) || p(z)) ---")
+    print(f"  Mean KL divergence per sample: {kls_tensor.mean().item():.4f}")
+    print(f"  Std KL divergence per sample: {kls_tensor.std().item():.4f}")
+    
+    # 可选：绘制 mu 和 logvar 的直方图
     plt.figure(figsize=(12, 5))
     plt.subplot(1, 2, 1)
     plt.hist(mus_tensor.view(-1).numpy(), bins=50, density=True)
     plt.title("Histogram of Latent Means (mu)")
+    plt.xlabel("Value")
+    plt.ylabel("Density")
 
     plt.subplot(1, 2, 2)
     plt.hist(logvars_tensor.view(-1).numpy(), bins=50, density=True)
     plt.title("Histogram of Latent Log Variances (logvar)")
+    plt.xlabel("Value")
     plt.tight_layout()
     plt.show()
+
 
 def compute_som_activation_heatmap(model, data_loader, device):
     """

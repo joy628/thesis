@@ -36,7 +36,7 @@ class SOMLayer(nn.Module):
         _, bmu_indices = torch.min(dists, dim=-1)
         bmu_indices = bmu_indices.view(batch_size, seq_len)
 
-        som_z = z + 0.1 * (nodes_flat[bmu_indices.view(-1)].view_as(z) - z)
+        som_z = z + 0.1 * (nodes_flat[bmu_indices.view(-1)].view_as(z) - z) # shape: (B, T, D_latent)
 
         return som_z, {
             'q': q,

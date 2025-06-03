@@ -281,24 +281,9 @@ def train_joint(model, train_loader, val_loader, train_loader_for_p, device, opt
     scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=patience // 2 if patience > 0 else 5)
     no_improve_val_epochs = 0
     
-    patient_start_offset_global_dict = build_patient_start_offset_dict(train_loader_for_p)
-
     
     ### 1. 初始化与 patient 偏移量计算
-    print("[Joint] Calculating  patient_start_offset_global (once before training)...")
-    all_lengths_for_offset_init = []
-    with torch.no_grad():
-        for _, lengths_p_init, _, _ in tqdm(train_loader_for_p, desc="[Joint Init] Collecting lengths", leave=False):
-            all_lengths_for_offset_init.extend(lengths_p_init.cpu().tolist())
-
-    current_offset = 0
-    patient_start_offset_list_global = [0]
-    for l_init in all_lengths_for_offset_init:
-        patient_start_offset_list_global.append(current_offset + l_init)
-        current_offset += l_init
-    patient_start_offset_global = torch.tensor(patient_start_offset_list_global[:-1], dtype=torch.long, device=device)
-    print(f"[Joint]  patient_start_offset_global calculated. Shape: {patient_start_offset_global.shape}")
-
+    patient_start_offset_global_dict = build_patient_start_offset_dict(train_loader_for_p)
 
     # 2. 
     p_target_train_global_flat_current_epoch = None

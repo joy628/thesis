@@ -18,8 +18,8 @@ class MultiModalDataset(Dataset):
     def __init__(self, data_path,global_node2idx):
         
         self.data_path = data_path
-        self.ts_h5_file = os.path.join(self.data_path, 'timeseries_each_patient.h5')
-        self.risks_h5_file = os.path.join(self.data_path, 'risk_each_patient.h5')
+        self.ts_h5_file = os.path.join(self.data_path, 'timeseries_15_each_patient.h5')
+        self.risks_h5_file = os.path.join(self.data_path, 'risk_15_each_patient.h5')
         self.flat_h5_file = os.path.join(self.data_path, 'flat.h5')
         self.diagnosis_h5_file = os.path.join(self.data_path, 'diagnoses.h5')
         
@@ -105,8 +105,8 @@ class VitalSignsDataset(Dataset):
     def __init__(self, data_path):
         
         self.data_path = data_path
-        self.ts_h5_file = os.path.join(self.data_path, 'timeseries_each_patient.h5')
-        self.risks_h5_file = os.path.join(self.data_path, 'risk_each_patient.h5')
+        self.ts_h5_file = os.path.join(self.data_path, 'timeseries_15_each_patient.h5')
+        self.risks_h5_file = os.path.join(self.data_path, 'risk_15_each_patient.h5')
         
         self.ts_h5f = h5py.File(self.ts_h5_file, 'r')
         self.risk_h5f = h5py.File(self.risks_h5_file, 'r')
@@ -148,27 +148,4 @@ def vital_pre_train(batch):
     categories = torch.tensor(category_list, dtype=torch.long)
     
     return padded_ts, lengths, original_indices, categories
-    
-# ## sliding window for vital signs data
-# def vital_pre_train(batch, window_size=512, stride=256):
-#     ts_list, category_list = zip(*batch)
-    
-#     windows = []
-#     masks = []
-#     labels = []
-
-#     for ts, label in zip(ts_list, category_list):
-#         T, F = ts.shape
-#         for start in range(0, max(1, T - window_size + 1), stride):
-#             window = ts[start:start + window_size]
-#             pad_len = window_size - window.shape[0]
-#             if pad_len > 0:
-#                 pad = torch.zeros(pad_len, F)
-#                 window = torch.cat([window, pad], dim=0)
-#             mask = torch.cat([torch.ones(min(T - start, window_size)), torch.zeros(pad_len)], dim=0)
-#             windows.append(window)
-#             masks.append(mask)
-#             labels.append(label)
-    
-#     return torch.stack(windows), torch.stack(masks), torch.tensor(labels)
 

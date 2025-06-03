@@ -264,7 +264,7 @@ def train_som(  model,  train_loader,  device,  max_epochs: int, save_dir: str,p
 def train_joint(model, train_loader, val_loader, train_loader_for_p, device, optimizer,
                 start_epoch: int, epochs: int, save_dir: str, kl_warmup_epochs: int = 10,
                 theta=1, gamma=50, kappa=1, beta=10, eta=1,
-                patience: int = 20, update_P_every_n_epochs: int = 5):
+                patience: int = 20):
 
     for param in model.parameters():
         param.requires_grad = True
@@ -292,62 +292,63 @@ def train_joint(model, train_loader, val_loader, train_loader_for_p, device, opt
         
         kl_weight = min(ep / kl_warmup_epochs, 1.0)
 
-        if ep % update_P_every_n_epochs == 0 or p_target_train_global_flat_current_epoch is None:
-            if ep +1% 10 == 0:
-                 print(f"[Joint] Ep{ep+1}: Calculating global target P...")
-            model.eval()
-            all_q_list_for_p_epoch = []
-            with torch.no_grad():
-                for x_p_batch, lengths_p_batch, _, _ in tqdm(train_loader_for_p, desc=f"[Joint E{ep+1}] Calc Global P", leave=False):
-                    x_p_batch, lengths_p_batch = x_p_batch.to(device), lengths_p_batch.to(device)
-                    outputs_p_calc = model(x_p_batch, lengths_p_batch, is_training=False)
-                    _, mask_p_flat_bool = model.generate_mask(x_p_batch.size(1), lengths_p_batch)
-                    q_for_p_batch_valid = outputs_p_calc["q_soft_flat"][mask_p_flat_bool]
-                    all_q_list_for_p_epoch.append(q_for_p_batch_valid.cpu())
-            q_train_all_valid_timesteps_epoch = torch.cat(all_q_list_for_p_epoch, dim=0)
-            p_target_train_global_flat_current_epoch = model.compute_target_distribution_p(q_train_all_valid_timesteps_epoch).to(device)
-            if ep+1 % 10 == 0:
-              print(f"[Joint] Ep{ep+1} Global P updated. Shape: {p_target_train_global_flat_current_epoch.shape}")
+        print(f"[Joint] Ep{ep+1}: Calculating global target P...")
+        model.eval()
+        all_q_list_for_p_epoch = [] # 收集本 epoch所有有效的 q_soft_flat
+        with torch.no_grad():
+            for x_p_batch, lengths_p_batch, _, _ in tqdm(train_loader_for_p, desc=f"[Joint E{ep+1}] Calc Global P", leave=False):
+                x_p_batch, lengths_p_batch = x_p_batch.to(device), lengths_p_batch.to(device)
+                outputs_p_calc = model(x_p_batch, lengths_p_batch, is_training=False)
+                
+                _, mask_p_flat_bool = model.generate_mask(x_p_batch.size(1), lengths_p_batch)
+                
+                q_for_p_batch_valid = outputs_p_calc["q_soft_flat"][mask_p_flat_bool]
+                all_q_list_for_p_epoch.append(q_for_p_batch_valid.cpu())
+                
+        q_train_all_valid_timesteps_epoch = torch.cat(all_q_list_for_p_epoch, dim=0)  # shape: (N_valid_timesteps, n_nodes)
+        # 根据 q 计算 全局目标分布 p  
+        p_target_train_global_flat_current_epoch = model.compute_target_distribution_p(q_train_all_valid_timesteps_epoch).to(device)
+        print(f"[Joint] Ep{ep+1} Global P updated. Shape: {p_target_train_global_flat_current_epoch.shape}")
 
+       # 进入训练阶段
         model.train()
         current_epoch_losses = {key: 0.0 for key in history if 'train_' in key}
         
-    
         for x_seq, lengths, original_indices_batch, _ in train_loader:
             x_seq, lengths = x_seq.to(device), lengths.to(device)
             original_indices_batch = original_indices_batch.to(device)
             B_actual, T_actual_max, D_input = x_seq.shape
             mask_seq, mask_flat_bool = model.generate_mask(T_actual_max, lengths)
-
+            
+            # 从全局p中 提取当前 bacth里每个患者的有效时间步的目标分布 p
             p_batch_target_list = []
-            if p_target_train_global_flat_current_epoch is not None:
-                for i in range(B_actual):
-                    orig_idx = original_indices_batch[i].item()
-                    len_actual = lengths[i].item()
-                    start_idx = patient_start_offset_global_dict.get(orig_idx, None)
-                    if start_idx is None:
-                        raise ValueError(f"Patient idx {orig_idx} not found in offset dict!")
-                    end_idx = start_idx + len_actual
-                    p_patient_valid = p_target_train_global_flat_current_epoch[start_idx:end_idx]
-                    p_batch_target_list.append(p_patient_valid)
-                p_batch_target_valid_timesteps = torch.cat(p_batch_target_list, dim=0)
-            else:
-                num_valid_steps = mask_flat_bool.sum().item()
-                p_batch_target_valid_timesteps = torch.ones(num_valid_steps, model.som_layer.n_nodes, device=device) / model.som_layer.n_nodes
+            # if p_target_train_global_flat_current_epoch is not None:
+            for i in range(B_actual): # 遍历当前 batch 中的每个患者
+                orig_idx = original_indices_batch[i].item()
+                len_actual = lengths[i].item()                                    # 该患者实际有效步数
+                start_idx = patient_start_offset_global_dict.get(orig_idx, None) #  患者在全局 offset dict 中的 key
+                if start_idx is None:
+                    raise ValueError(f"Patient idx {orig_idx} not found in offset dict!")
+                end_idx = start_idx + len_actual
+                p_patient_valid = p_target_train_global_flat_current_epoch[start_idx:end_idx] # 从全局p中 取出当前患者 p
+                p_batch_target_list.append(p_patient_valid)
+            p_batch_target_valid_timesteps = torch.cat(p_batch_target_list, dim=0) # shape: (N_valid_steps, n_nodes)
+            # else:
+            #     num_valid_steps = mask_flat_bool.sum().item()
+            #     p_batch_target_valid_timesteps = torch.ones(num_valid_steps, model.som_layer.n_nodes, device=device) / model.som_layer.n_nodes
 
             optimizer.zero_grad()
             
             outputs = model(x_seq, lengths, is_training=True)
             
-            q_soft_flat_valid = outputs["q_soft_flat"][mask_flat_bool]
-            q_soft_flat_ng_valid = outputs["q_soft_flat_ng"][mask_flat_bool]
+            q_soft_flat_valid = outputs["q_soft_flat"][mask_flat_bool] # 拿出 当前 bacth 每个 模型计算的 有效时间步的 q_soft_flat
+            q_soft_flat_ng_valid = outputs["q_soft_flat_ng"][mask_flat_bool] 
 
             if p_batch_target_valid_timesteps.shape[0] != q_soft_flat_valid.shape[0]:
                 print(f"Warning: P-Q mismatch, falling back to uniform P.")
                 num_valid_steps = q_soft_flat_valid.shape[0]
                 p_batch_target_valid_timesteps = torch.ones(num_valid_steps, model.som_layer.n_nodes, device=device) / model.som_layer.n_nodes
                 
-    
             loss_elbo, recon_l, kl_l = model.compute_loss_reconstruction_ze(
                 x_seq, outputs["recon_dist_flat"], outputs["z_dist_flat"], kl_weight, mask_seq
             )

@@ -206,10 +206,10 @@ class TSAutoencoder(nn.Module):
 
         # Prepare outputs
         outputs = {
-            "z_dist_flat": z_dist_flat,                 # q(z|x) for each timestep
+            "z_dist_flat": z_dist_flat,                 # q(z|x) for each timestep from encoder
             "z_e_sample_flat": z_e_sample_flat,         # Sampled z for each timestep
             "z_e_sample_seq": z_e_sample_seq,           # Sampled z, reshaped to (B, T, D)
-            "recon_dist_flat": recon_dist_seq,         # p(x_hat|z) for each timestep
+            "recon_dist_flat": recon_dist_seq,         # p(x_hat|z) for each timestep from decoder
             "bmu_indices_flat": bmu_indices_flat,       # BMU index for each z_e_sample_flat
             "z_q_flat": z_q_flat,                       # BMU embedding for each z_e_sample_flat
             "z_q_neighbors_stacked_flat": z_q_neighbors_stacked_flat, # For SOM pretrain loss

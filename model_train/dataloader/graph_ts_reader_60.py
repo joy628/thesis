@@ -18,8 +18,8 @@ class MultiModalDataset(Dataset):
     def __init__(self, data_path,global_node2idx):
         
         self.data_path = data_path
-        self.ts_h5_file = os.path.join(self.data_path, 'timeseries_each_patient.h5')
-        self.risks_h5_file = os.path.join(self.data_path, 'risk_each_patient.h5')
+        self.ts_h5_file = os.path.join(self.data_path, 'timeseries_60_each_patient.h5')
+        self.risks_h5_file = os.path.join(self.data_path, 'risk_60_each_patient.h5')
         self.flat_h5_file = os.path.join(self.data_path, 'flat.h5')
         self.diagnosis_h5_file = os.path.join(self.data_path, 'diagnoses.h5')
         
@@ -105,8 +105,8 @@ class VitalSignsDataset(Dataset):
     def __init__(self, data_path):
         
         self.data_path = data_path
-        self.ts_h5_file = os.path.join(self.data_path, 'timeseries_each_patient.h5')
-        self.risks_h5_file = os.path.join(self.data_path, 'risk_each_patient.h5')
+        self.ts_h5_file = os.path.join(self.data_path, 'timeseries_60_each_patient.h5')
+        self.risks_h5_file = os.path.join(self.data_path, 'risk_60_each_patient.h5')
         
         self.ts_h5f = h5py.File(self.ts_h5_file, 'r')
         self.risk_h5f = h5py.File(self.risks_h5_file, 'r')

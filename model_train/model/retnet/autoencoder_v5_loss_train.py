@@ -79,7 +79,7 @@ def train_vae(model, train_loader, device, optimizer, start,epochs, save_dir, pa
         
         
         # kl_weight = cyclical_kl_weight(ep, cycle_length=kl_warmup_epochs)
-        beta_value_for_kl = 0.001 # 
+        beta_value_for_kl = 0.01 # 
         if ep < kl_warmup_epochs:
             kl_weight = beta_value_for_kl * (ep / kl_warmup_epochs)
         else:
@@ -96,20 +96,19 @@ def train_vae(model, train_loader, device, optimizer, start,epochs, save_dir, pa
             optimizer.zero_grad()
             x_seq, lengths = x_seq.to(device), lengths.to(device)
             B, T_max, D_input = x_seq.shape
-            mask_seq, _ = model.generate_mask(T_max, lengths) # (B, T_max) and (B*T_max)
+            mask_seq, mask_flat_bool = model.generate_mask(T_max, lengths) # (B, T_max) and (B*T_max)
             
             
             
             outputs = model(x_seq, lengths, is_training=True) # is_training affects BN/Dropout in VAE
             
-            check_nan_in_dist(outputs["recon_dist_flat"], "recon_dist")
-            check_nan_in_dist(outputs["z_dist_flat"], "z_dist")
+            check_nan_in_dist(outputs["recon_dist_seq"], "recon_dist")
+            check_nan_in_dist(outputs["z_dist_seq"], "z_dist")
             
-        
             loss_elbo, recon_l, kl_l = model.compute_loss_reconstruction_ze(
                 x_seq,       
-                outputs["recon_dist_flat"],   
-                outputs["z_dist_flat"],       
+                outputs["recon_dist_seq"],   
+                outputs["z_dist_seq"], # [B,T_max, D]   
                 kl_weight, # Annealed KL weight for VAE loss
                 mask_seq                     
             )
@@ -139,8 +138,8 @@ def train_vae(model, train_loader, device, optimizer, start,epochs, save_dir, pa
         history['Epoch_ELBO'].append(avg_epoch_loss)
         history['Epoch_Recon'].append(avg_epoch_recon)
         history['Epoch_KL'].append(avg_epoch_kl_weighted)
-        if (ep+1) % 10 == 0 or (ep+1) == epochs:
-           print(f"[Epoch {ep}] KL weight: {kl_weight:.4f}, KL: {avg_epoch_kl_weighted:.4f}")
+        if (ep+1) % 50 == 0 or (ep+1) == epochs:
+           print(f"[Epoch {ep+1}] KL weight: {kl_weight:.4f}, KL: {avg_epoch_kl_weighted:.4f}")
         
         scheduler.step(avg_epoch_loss)
 
@@ -264,7 +263,7 @@ def train_som(  model,  train_loader,  device,  max_epochs: int, save_dir: str,p
 def train_joint(model, train_loader, val_loader, train_loader_for_p, device, optimizer,
                 start_epoch: int, epochs: int, save_dir: str, kl_warmup_epochs: int = 10,
                 theta=1, gamma=50, kappa=1, beta=10, eta=1,
-                patience: int = 20, update_P_every_n_epochs: int = 5):
+                patience: int = 20):
 
     for param in model.parameters():
         param.requires_grad = True
@@ -309,7 +308,8 @@ def train_joint(model, train_loader, val_loader, train_loader_for_p, device, opt
         q_train_all_valid_timesteps_epoch = torch.cat(all_q_list_for_p_epoch, dim=0)
         p_target_train_global_flat_current_epoch = model.compute_target_distribution_p(q_train_all_valid_timesteps_epoch).to(device)
         
-        print(f"[Joint] Ep{ep+1} Global P updated. Shape: {p_target_train_global_flat_current_epoch.shape}")
+        if (ep+1) % 10 == 0 or (ep+1) == epochs:
+            print(f"[Joint] Ep{ep+1} Global P updated. Shape: {p_target_train_global_flat_current_epoch.shape}")
 
         model.train()
         current_epoch_losses = {key: 0.0 for key in history if 'train_' in key}
@@ -319,7 +319,7 @@ def train_joint(model, train_loader, val_loader, train_loader_for_p, device, opt
             x_seq, lengths = x_seq.to(device), lengths.to(device)
             original_indices_batch = original_indices_batch.to(device)
             B_actual, T_actual_max, D_input = x_seq.shape
-            _, mask_flat_bool = model.generate_mask(T_actual_max, lengths)
+            mask_seq, mask_flat_bool = model.generate_mask(T_actual_max, lengths)
 
             p_batch_target_list = []
             # if p_target_train_global_flat_current_epoch is not None:
@@ -347,24 +347,26 @@ def train_joint(model, train_loader, val_loader, train_loader_for_p, device, opt
                 num_valid_steps = q_soft_flat_valid.shape[0]
                 p_batch_target_valid_timesteps = torch.ones(num_valid_steps, model.som_layer.n_nodes, device=device) / model.som_layer.n_nodes
            
+            
             ####  loss =========
+            
+            
             loss_elbo, recon_l, kl_l = model.compute_loss_reconstruction_ze(
-                x_seq, outputs["recon_dist_flat"], outputs["z_dist_flat"], kl_weight, mask_flat_bool.float()
+                x_seq, outputs["recon_dist_seq"], outputs["z_dist_seq"], kl_weight, mask_seq
             )
             loss_cah = model.compute_loss_commit_cah(p_batch_target_valid_timesteps, q_soft_flat_valid)
+            
             loss_s_som = model.compute_loss_s_som(q_soft_flat_valid, q_soft_flat_ng_valid)
             
-            z_e_sample_seq_flat = outputs["z_e_sample_seq"].reshape(B_actual * T_actual_max, -1) # shape    : (B*T_max, D_latent)
-            z_e_sample_valid = z_e_sample_seq_flat[mask_flat_bool] # shape: (valid_steps, D_latent)
-
+            z_e_sample_seq = outputs["z_e_sample_seq"]
             bmu_indices_flat = outputs["bmu_indices_flat_for_smooth"] # shape: (B*T_max,)
-            bmu_indices_valid = bmu_indices_flat[mask_flat_bool] #  shape: (valid_steps,)
-
+              
             loss_smooth = model.compute_loss_smoothness(
-                z_e_sample_valid, bmu_indices_valid, model.alpha_som_q, mask_flat_bool.float()
-)
+              z_e_sample_seq, bmu_indices_flat, model.alpha_som_q, mask_seq
+        )
+            pred_z_dist_flat = outputs["pred_z_dist_seq"] 
             
-            loss_pred = model.compute_loss_prediction(outputs["pred_z_dist_flat"], outputs["z_e_sample_seq"], mask_flat_bool.float())
+            loss_pred = model.compute_loss_prediction(pred_z_dist_flat, outputs["z_e_sample_seq"], mask_flat_bool)
 
             total_loss = theta * loss_elbo + gamma * loss_cah + beta * loss_s_som + kappa * loss_smooth + eta * loss_pred
             total_loss.backward()
@@ -390,11 +392,17 @@ def train_joint(model, train_loader, val_loader, train_loader_for_p, device, opt
                 B_val, T_val_max, D_input = x_seq_val.shape
                 mask_seq, mask_flat_val = model.generate_mask(T_val_max, lengths_val)
                 outputs_val = model(x_seq_val, lengths_val, is_training=False)
-                x_flat_for_loss_val = x_seq_val
-                loss_elbo_val, _, _ = model.compute_loss_reconstruction_ze(x_flat_for_loss_val, outputs_val["recon_dist_flat"], outputs_val["z_dist_flat"], kl_weight, mask_seq)
-                loss_smooth_val = model.compute_loss_smoothness(outputs_val["z_e_sample_seq"], outputs_val["bmu_indices_flat_for_smooth"], model.alpha_som_q, mask_flat_val.float())
                 
-                loss_pred_val = model.compute_loss_prediction(outputs_val["pred_z_dist_flat"], outputs_val["z_e_sample_seq"], mask_flat_val.float())
+                loss_elbo_val, _, _ = model.compute_loss_reconstruction_ze(x_seq_val, outputs_val["recon_dist_seq"], outputs_val["z_dist_seq"], kl_weight,  mask_seq)
+                
+                loss_smooth_val = model.compute_loss_smoothness(outputs_val["z_e_sample_seq"], outputs_val["bmu_indices_flat_for_smooth"], model.alpha_som_q, mask_seq)
+                
+                
+                pred_z_dist_flat = outputs_val["pred_z_dist_seq"]
+    
+                
+                loss_pred_val = model.compute_loss_prediction( pred_z_dist_flat, outputs_val["z_e_sample_seq"],mask_flat_val)
+                
                 total_epoch_loss_val += (loss_elbo_val + loss_smooth_val + loss_pred_val).item()
 
         avg_val_loss = total_epoch_loss_val / len(val_loader)
@@ -427,72 +435,6 @@ def train_joint(model, train_loader, val_loader, train_loader_for_p, device, opt
 
 
 
-
-
-def train_prediction(  model, train_loader, device,  start_epoch: int, max_epochs: int,  save_dir: str, lr: float, patience: int = 10
-):
-    os.makedirs(save_dir, exist_ok=True)
-    
-    freeze_all(model)
-    unfreeze_module(model.lstm_predictor)
-
-    model.train()
-
-    # **重新新建 optimizer**，只给预测器
-    optimizer = torch.optim.Adam(
-        filter(lambda p: p.requires_grad, model.parameters()),
-        lr=lr
-    )
-
-    best_loss = float("inf")
-    best_wts  = copy.deepcopy(model.state_dict())
-    scheduler = ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=patience)
-    history = []
-    no_imp = 0
-
-    for ep in range(start_epoch, max_epochs):
-        epoch_loss = 0.0
-        for x, lengths,_ in train_loader:
-            x, lengths = x.to(device), lengths.to(device)
-
-            out = model(x,lengths)
-            z_seq = out['z_seq'].detach()
-            pred_z = model.predict_next(z_seq,lengths)
-            out_pred = model(x,is_training=False, use_lstm=True, predicted_next_z_e=pred_z.reshape(-1, pred_z.shape[-1]))
-            loss = loss_prediction(out_pred['x_hat'].view(z_seq.shape[0], -1, z_seq.shape[-1])[:, 1:], z_seq[:, 1:], lengths)
-
-            # 4) 反向 + 更新
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-
-            epoch_loss += loss.item()
-
-        avg = epoch_loss / len(train_loader)
-        history.append(avg)
-        scheduler.step(avg)
-
-        # early stopping & 保存
-        if avg < best_loss:
-            best_loss = avg
-            best_wts  = copy.deepcopy(model.state_dict())
-            torch.save(best_wts, os.path.join(save_dir, "best_pred.pth"))
-            no_imp = 0
-        else:
-            no_imp += 1
-            if no_imp >= patience:
-                print(f"[Predict] Early stopping @ epoch {ep+1}")
-                break
-        if (ep+1) % 10 == 0 or (ep+1) == max_epochs:
-            print(f"[Predict] Epoch {ep+1}/{max_epochs} Loss={avg:.4f}")
-
-    # 恢复最优
-    model.load_state_dict(best_wts)
-    # 存 history
-    with open(os.path.join(save_dir, "history_pred.json"), "w") as f:
-        json.dump(history, f, indent=2)
-
-    return model, history 
 
 
 
@@ -547,7 +489,7 @@ def collect_latents(model, data_loader, device, max_batches=20):
             labels = labels.to(device)
 
             out = model(x, lengths, is_training=False)
-            z_mu = out["z_dist_flat"].mean  # shape: (B, T, D)
+            z_mu = out["z_dist_seq"].mean  # shape: (B, T, D)
             B, T, D = z_mu.shape
 
             for b in range(B):
@@ -616,7 +558,7 @@ def analyze_latent_stats(model, data_loader, device, num_batches_to_analyze=20):
             lengths_batch = lengths_batch.to(device)
 
             outputs = model(x_seq_batch, lengths_batch, is_training=False)
-            z_dist = outputs["z_dist_flat"]  # Shape: (B, T, D)
+            z_dist = outputs["z_dist_seq"]  # Shape: (B, T, D)
             z_mu = z_dist.mean
             z_logvar = z_dist.stddev.pow(2).log()
 
@@ -726,12 +668,12 @@ def visualize_recons(model, data_loader, num_patients, feature_indices, feature_
 
         # 2. 获取模型输出并 reshape 重建结果
         outputs = model(x, lengths, is_training=False)
-        if hasattr(outputs["recon_dist_flat"], 'mean'):
-           x_hat = outputs["recon_dist_flat"].mean 
+        if hasattr(outputs["recon_dist_seq"], 'mean'):
+           x_hat = outputs["recon_dist_seq"].mean 
         if x_hat.ndim == 2 and x.ndim == 3: # 如果 mean 返回的是扁平化的 (B*T, D)
              x_hat = x_hat.view(x.size(0), x.size(1), x.size(2))
-        elif hasattr(outputs["recon_dist_flat"], 'base_dist') and hasattr(outputs["recon_dist_flat"].base_dist, 'loc'):
-            x_hat = outputs["recon_dist_flat"].base_dist.loc
+        elif hasattr(outputs["recon_dist_seq"], 'base_dist') and hasattr(outputs["recon_dist_seq"].base_dist, 'loc'):
+            x_hat = outputs["recon_dist_seq"].base_dist.loc
             if x_hat.ndim == 2 and x.ndim == 3: # 如果 loc 返回的是扁平化的 (B*T, D)
                 x_hat = x_hat.view(x.size(0), x.size(1), x.size(2))
         else:

@@ -5,8 +5,8 @@ from torch.distributions import Normal, kl_divergence, Independent
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 import matplotlib.pyplot as plt
 import sys
-sys.path.append('/home/mei/nas/docker/thesis/model_train')
-from  model.retnetModule.retnet import RetNet
+sys.path.append('/home/mei/nas/docker/thesis/model_train/model')
+from  retnet.retnetModule.retnet import RetNet
 
 class RetNetEncoder(nn.Module):
     def __init__(self, input_dim, latent_dim, hidden_dim=256, layers=1, ffn_size=256, heads=2):
@@ -181,17 +181,17 @@ class TSAutoencoder(nn.Module):
         B, T_max, _ = x_input_seq.shape
         
         # 2. get latent distribution q(z|x) from encoder
-        z_dist_flat = self.encoder(x_input_seq,lengths) # [b, T_max, D_latent] 
+        z_dist_seq = self.encoder(x_input_seq,lengths) # [b, T_max, D_latent] 
         
         # 3. Sample z_e from the distribution
         if is_training:
-            z_e_sample_seq = z_dist_flat.rsample() #  (B, T_max, latent_dim)
+            z_e_sample_seq = z_dist_seq.rsample() #  (B, T_max, latent_dim)
         else:
-            z_e_sample_seq = z_dist_flat.mean # Use mean during inference for stability shape (B, T_max, latent_dim)
+            z_e_sample_seq = z_dist_seq.mean # Use mean during inference for stability shape (B, T_max, latent_dim)
         
                     
         # 4. VAE Decoder -> Get reconstruction distribution p(x_hat|z_e)
-        recon_dist_seq = self.decoder( z_e_sample_seq) # IndependentNormal, event_shape=[input_channels], batch_shape=[B*T]
+        recon_dist_seq = self.decoder( z_e_sample_seq) # IndependentNormal, event_shape=[input_channels], batch_shape=[B,T]
 
         # 5. SOM computations (on z_e_sample_flat)
         #   Distances from z_e_sample_flat to SOM embeddings
@@ -215,7 +215,7 @@ class TSAutoencoder(nn.Module):
         
         bmu_indices_flat_for_smooth = bmu_indices_flat
         
-        # 6. LSTM Prediction (on z_e_sample_seq)
+        # 6. LSTM Prediction (on z_e_sample_seq ,shape (B, T_max, D_latent))
         prediction_distribution_from_lstm, (h_n, c_n) = self.predictor(
             z_e_sample_seq.detach(),  # 输入给LSTM的z应不带梯度回传到encoder
             lengths,
@@ -224,10 +224,10 @@ class TSAutoencoder(nn.Module):
 
         # Prepare outputs
         outputs = {
-            "z_dist_flat": z_dist_flat,                 # q(z|x) for each timestep，[B, T_max, D_latent]
+            "z_dist_seq": z_dist_seq,               # q(z|x) for each timestep，[B, T_max, D_latent]
             "z_e_sample_flat": z_e_sample_flat,         # Sampled z for each timestep
             "z_e_sample_seq": z_e_sample_seq,           # Sampled z, reshaped to (B, T, D)
-            "recon_dist_flat": recon_dist_seq,         # p(x_hat|z) for each timestep
+            "recon_dist_seq": recon_dist_seq,         # p(x_hat|z) for each timestep
             "bmu_indices_flat": bmu_indices_flat,       # BMU index for each z_e_sample_flat
             "z_q_flat": z_q_flat,                       # BMU embedding for each z_e_sample_flat
             "z_q_neighbors_stacked_flat": z_q_neighbors_stacked_flat, # For SOM pretrain loss
@@ -235,7 +235,7 @@ class TSAutoencoder(nn.Module):
             "q_soft_flat_ng": q_soft_flat_ng, 
             "bmu_indices_flat_for_smooth": bmu_indices_flat_for_smooth,
             
-            "pred_z_dist_flat": prediction_distribution_from_lstm,   # LSTM's prediction dist for next z
+            "pred_z_dist_seq": prediction_distribution_from_lstm,   # LSTM's prediction dist for next z
             "lstm_final_state": (h_n, c_n)
         }
         return outputs
@@ -270,6 +270,7 @@ class TSAutoencoder(nn.Module):
         return mask_seq_bool, mask_flat_bool
     
 
+    
     def compute_loss_reconstruction_ze(self, x_input_seq_true, recon_dist_seq, z_dist_seq, prior_beta_vae, mask_seq):
         """
         x_input_seq_true: (B, T_max, D_features)
@@ -278,16 +279,17 @@ class TSAutoencoder(nn.Module):
         prior_beta_vae: scalar, weight for KL term
         mask_seq: (B, T_max), boolean or float
         """
-        # Reconstruction Loss (log likelihood)       
-        log_prob_per_timestep = recon_dist_seq.log_prob(x_input_seq_true) 
+        # Reconstruction Loss (log likelihood) 
         
-        if mask_seq.dtype == torch.bool:
-            mask_seq = mask_seq.float()
-            
-        # sum over all valid timesteps in the batch and divide by total valid timesteps
-        masked_log_prob_sum = torch.sum(log_prob_per_timestep * mask_seq)
-        num_valid_timesteps_total = mask_seq.sum().clamp(min=1)
-        log_lik_loss = - (masked_log_prob_sum / num_valid_timesteps_total)
+        # 1）log‐likelihood per‐timestep → (B,T)    
+        log_p = recon_dist_seq.log_prob(x_input_seq_true)
+        mask_f = mask_seq.float()
+        
+        # 2）序列内平均：sum_t log_p*mask / sum_t mask  → (B,)
+        per_seq_lp = (log_p * mask_f).sum(dim=1) / mask_f.sum(dim=1).clamp(min=1)
+        
+        # 3）batch 平均 & 取负 → scalar
+        recon_loss = - per_seq_lp.mean()
         
         # KL Divergence
         # Create prior: N(0,I) for each z_t. batch_shape=(B, T_max), event_shape=(D_latent,)
@@ -296,15 +298,14 @@ class TSAutoencoder(nn.Module):
  )
         
         # kl_divergence(z_dist_seq, prior_dist) will have shape (B, T_max)
-        kl_div_per_timestep = kl_divergence(z_dist_seq, prior_dist)
+        prior = Independent(Normal(torch.zeros_like(z_dist_seq.mean),
+                                torch.ones_like(z_dist_seq.stddev)), 1)
+        kl_t = kl_divergence(z_dist_seq, prior)        # (B,T)
+        per_seq_kl = (kl_t * mask_f).sum(dim=1) / mask_f.sum(dim=1).clamp(min=1)
+        kl_loss = per_seq_kl.mean()
         
-        # Sum KL over valid timesteps and then average
-        masked_kl_div_sum_total = torch.sum(kl_div_per_timestep * mask_seq)
-
-        kl_loss = masked_kl_div_sum_total / num_valid_timesteps_total
-        
-        elbo_loss = log_lik_loss + prior_beta_vae * kl_loss
-        return elbo_loss, log_lik_loss, kl_loss
+        elbo = recon_loss + prior_beta_vae * kl_loss
+        return elbo, recon_loss, kl_loss
 
     def compute_target_distribution_p(self, q_soft_flat): # q_soft_flat: (N, H*W)
         # Corresponds to model.target_distribution(q) in TF
@@ -364,29 +365,30 @@ class TSAutoencoder(nn.Module):
         
         loss_s_som = -torch.mean(torch.sum(loss_val, dim=1)) # Sum over nodes, then mean over samples. Negative for maximization.
         return loss_s_som
+    
+    def compute_loss_prediction(self, pred_z_dist_flat, z_e_sample_seq, mask_flat_bool): # Renamed mask input
+            # pred_z_dist_flat: IndependentNormal, batch_shape=(B*T_max), event_shape=(latent_dim)
+            # z_e_sample_seq: (B, T_max, D_latent), true z sequence
+            # mask_flat_bool: (B*T_max), boolean mask for valid timesteps
+            
+            B, T, D_latent = z_e_sample_seq.shape
 
-    def compute_loss_prediction(self, pred_z_dist_seq, z_e_sample_seq, mask_seq):
-        
-        """
-        # pred_z_dist_seq: IndependentNormal for predicted z_{t+1}, batch_shape=(B,T_max)
-        # z_e_sample_seq: (B, T_max, D_latent), true z sequence
-        # mask_seq: (B, T_max), 1/0 for valid timesteps
-        """
-        B, T, D_latent = z_e_sample_seq.shape
+            # Target is the next timestep's z_e
+            z_e_next_targets_seq = torch.cat([z_e_sample_seq[:, 1:, :], 
+                                            z_e_sample_seq[:, -1:, :]], dim=1) # Shape (B, T, D_latent)
+            z_e_next_targets_flat = z_e_next_targets_seq.reshape(B * T, D_latent) # Shape (B*T_max, D_latent)
+            
+            current_mask_flat = mask_flat_bool.float() if mask_flat_bool.dtype == torch.bool else mask_flat_bool
 
-        z_e_next_targets_seq = torch.cat([z_e_sample_seq[:, 1:, :], 
-                                          z_e_sample_seq[:, -1:, :]], dim=1) # Shape (B, T, D_latent)
-
-        if mask_seq.dtype == torch.bool:
-            mask_seq = mask_seq.float()
-
-        
-        log_prob_per_timestep = pred_z_dist_seq.log_prob(z_e_next_targets_seq.detach()) # (B, T_max)
-        
-        masked_log_prob_sum = torch.sum(log_prob_per_timestep * mask_seq)
-        num_valid_timesteps_total = mask_seq.sum().clamp(min=1)
-        loss = - (masked_log_prob_sum / num_valid_timesteps_total)
-        return loss
+            # log_p will have shape (B*T_max)
+            log_p = pred_z_dist_flat.log_prob(z_e_next_targets_flat.detach())
+            
+            # Sum log_p for valid timesteps and divide by the number of valid timesteps in the batch
+            masked_log_p_sum = torch.sum(log_p * current_mask_flat)
+            num_valid_timesteps_total = current_mask_flat.sum().clamp(min=1)
+            
+            loss = - (masked_log_p_sum / num_valid_timesteps_total)
+            return loss
 
     def compute_loss_smoothness(self, z_e_sample_seq, bmu_indices_flat, alpha_som_q, mask_seq): #
 

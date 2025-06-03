@@ -72,10 +72,9 @@ def train_vae(model, train_loader, device, optimizer, start,epochs, save_dir, pa
     model.train()
     for ep in range(start,epochs):
         
-        
 
         # kl_weight = cyclical_kl_weight(ep, cycle_length=kl_warmup_epochs)
-        beta_value_for_kl = 2.0 # 
+        beta_value_for_kl = 0.1 # 
         if ep < kl_warmup_epochs:
             kl_weight = beta_value_for_kl * (ep / kl_warmup_epochs)
         else:
@@ -257,7 +256,7 @@ def train_som(  model,  train_loader,  device,  max_epochs: int, save_dir: str,p
 def train_joint(model, train_loader, val_loader, train_loader_for_p, device, optimizer,
                 start_epoch: int, epochs: int, save_dir: str, kl_warmup_epochs: int = 10,
                 theta=1, gamma=50, kappa=1, beta=10, eta=1,
-                patience: int = 20, update_P_every_n_epochs: int = 5):
+                patience: int = 20):
 
     for param in model.parameters():
         param.requires_grad = True
@@ -274,24 +273,11 @@ def train_joint(model, train_loader, val_loader, train_loader_for_p, device, opt
     scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=patience // 2 if patience > 0 else 5)
     no_improve_val_epochs = 0
     
-    patient_start_offset_global_dict = build_patient_start_offset_dict(train_loader_for_p)
 
     
     ### 1. 初始化与 patient 偏移量计算
-    print("[Joint] Calculating fixed patient_start_offset_global (once before training)...")
-    all_lengths_for_offset_init = []
-    with torch.no_grad():
-        for _, lengths_p_init, _, _ in tqdm(train_loader_for_p, desc="[Joint Init] Collecting lengths", leave=False):
-            all_lengths_for_offset_init.extend(lengths_p_init.cpu().tolist())
 
-    current_offset = 0
-    patient_start_offset_list_global = [0]
-    for l_init in all_lengths_for_offset_init:
-        patient_start_offset_list_global.append(current_offset + l_init)
-        current_offset += l_init
-    patient_start_offset_global = torch.tensor(patient_start_offset_list_global[:-1], dtype=torch.long, device=device)
-    print(f"[Joint] Fixed patient_start_offset_global calculated. Shape: {patient_start_offset_global.shape}")
-
+    patient_start_offset_global_dict = build_patient_start_offset_dict(train_loader_for_p)
 
     # 2. 
     p_target_train_global_flat_current_epoch = None
@@ -299,23 +285,22 @@ def train_joint(model, train_loader, val_loader, train_loader_for_p, device, opt
     for ep in range(start_epoch, epochs):
         
         kl_weight = min(ep / kl_warmup_epochs, 1.0)
-
-        if ep % update_P_every_n_epochs == 0 or p_target_train_global_flat_current_epoch is None:
-            if ep +1% 10 == 0:
-                 print(f"[Joint] Ep{ep+1}: Calculating global target P...")
-            model.eval()
-            all_q_list_for_p_epoch = []
-            with torch.no_grad():
-                for x_p_batch, lengths_p_batch, _, _ in tqdm(train_loader_for_p, desc=f"[Joint E{ep+1}] Calc Global P", leave=False):
-                    x_p_batch, lengths_p_batch = x_p_batch.to(device), lengths_p_batch.to(device)
-                    outputs_p_calc = model(x_p_batch, lengths_p_batch, is_training=False)
-                    _, mask_p_flat_bool = model.generate_mask(x_p_batch.size(1), lengths_p_batch)
-                    q_for_p_batch_valid = outputs_p_calc["q_soft_flat"][mask_p_flat_bool]
-                    all_q_list_for_p_epoch.append(q_for_p_batch_valid.cpu())
-            q_train_all_valid_timesteps_epoch = torch.cat(all_q_list_for_p_epoch, dim=0)
-            p_target_train_global_flat_current_epoch = model.compute_target_distribution_p(q_train_all_valid_timesteps_epoch).to(device)
-            if ep+1 % 10 == 0:
-              print(f"[Joint] Ep{ep+1} Global P updated. Shape: {p_target_train_global_flat_current_epoch.shape}")
+         
+        if (ep+1) % 10 == 0 or (ep+1) == epochs:
+          print(f"[Joint] Ep{ep+1}: Calculating global target P...")
+        model.eval()
+        all_q_list_for_p_epoch = []
+        with torch.no_grad():
+            for x_p_batch, lengths_p_batch, _, _ in tqdm(train_loader_for_p, desc=f"[Joint E{ep+1}] Calc Global P", leave=False):
+                x_p_batch, lengths_p_batch = x_p_batch.to(device), lengths_p_batch.to(device)
+                outputs_p_calc = model(x_p_batch, lengths_p_batch, is_training=False)
+                _, mask_p_flat_bool = model.generate_mask(x_p_batch.size(1), lengths_p_batch)
+                q_for_p_batch_valid = outputs_p_calc["q_soft_flat"][mask_p_flat_bool]
+                all_q_list_for_p_epoch.append(q_for_p_batch_valid.cpu())
+        q_train_all_valid_timesteps_epoch = torch.cat(all_q_list_for_p_epoch, dim=0)
+        p_target_train_global_flat_current_epoch = model.compute_target_distribution_p(q_train_all_valid_timesteps_epoch).to(device)
+        if (ep+1) % 10 == 0 or (ep+1) == epochs:
+           print(f"[Joint] Ep{ep+1} Global P updated. Shape: {p_target_train_global_flat_current_epoch.shape}")
 
         model.train()
         current_epoch_losses = {key: 0.0 for key in history if 'train_' in key}
@@ -325,23 +310,19 @@ def train_joint(model, train_loader, val_loader, train_loader_for_p, device, opt
             x_seq, lengths = x_seq.to(device), lengths.to(device)
             original_indices_batch = original_indices_batch.to(device)
             B_actual, T_actual_max, D_input = x_seq.shape
-            _, mask_flat_bool = model.generate_mask(T_actual_max, lengths)
+            mask_seq, mask_flat_bool = model.generate_mask(T_actual_max, lengths)
 
             p_batch_target_list = []
-            if p_target_train_global_flat_current_epoch is not None:
-                for i in range(B_actual):
-                    orig_idx = original_indices_batch[i].item()
-                    len_actual = lengths[i].item()
-                    start_idx = patient_start_offset_global_dict.get(orig_idx, None)
-                    if start_idx is None:
-                        raise ValueError(f"Patient idx {orig_idx} not found in offset dict!")
-                    end_idx = start_idx + len_actual
-                    p_patient_valid = p_target_train_global_flat_current_epoch[start_idx:end_idx]
-                    p_batch_target_list.append(p_patient_valid)
-                p_batch_target_valid_timesteps = torch.cat(p_batch_target_list, dim=0)
-            else:
-                num_valid_steps = mask_flat_bool.sum().item()
-                p_batch_target_valid_timesteps = torch.ones(num_valid_steps, model.som_layer.n_nodes, device=device) / model.som_layer.n_nodes
+            for i in range(B_actual):
+                orig_idx = original_indices_batch[i].item()
+                len_actual = lengths[i].item()
+                start_idx = patient_start_offset_global_dict.get(orig_idx, None)
+                if start_idx is None:
+                    raise ValueError(f"Patient idx {orig_idx} not found in offset dict!")
+                end_idx = start_idx + len_actual
+                p_patient_valid = p_target_train_global_flat_current_epoch[start_idx:end_idx]
+                p_batch_target_list.append(p_patient_valid)
+            p_batch_target_valid_timesteps = torch.cat(p_batch_target_list, dim=0)
 
             optimizer.zero_grad()
             outputs = model(x_seq, lengths, is_training=True)
@@ -352,6 +333,8 @@ def train_joint(model, train_loader, val_loader, train_loader_for_p, device, opt
                 print(f"Warning: P-Q mismatch, falling back to uniform P.")
                 num_valid_steps = q_soft_flat_valid.shape[0]
                 p_batch_target_valid_timesteps = torch.ones(num_valid_steps, model.som_layer.n_nodes, device=device) / model.som_layer.n_nodes
+                
+            
 
             x_flat_for_loss = x_seq.reshape(B_actual * T_actual_max, D_input)
             loss_elbo, recon_l, kl_l = model.compute_loss_reconstruction_ze(

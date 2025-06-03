@@ -1,8 +1,8 @@
 import torch
 import torch.nn as nn
 import sys
-sys.path.append('/home/mei/nas/docker/thesis/model_train')
-from  retnetModule.retention import MultiScaleRetention
+sys.path.append('/home/mei/nas/docker/thesis/model_train/retnet')
+from  retnet.retnetModule.retention import MultiScaleRetention
 
 class RetNet(nn.Module):
     def __init__(self, layers, hidden_dim, ffn_size, heads, double_v_dim=False):

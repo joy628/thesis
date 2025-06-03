@@ -403,6 +403,7 @@ class TSAutoencoder(nn.Module):
 
         # Target is the next timestep's z_e
         z_e_next_targets_seq = torch.cat([z_e_sample_seq[:, 1:, :], z_e_sample_seq[:, -1:, :]], dim=1)
+        
         z_e_next_targets_flat = z_e_next_targets_seq.reshape(B * T, D_latent)
 
         # mask reshape

@@ -4,8 +4,8 @@ import torch
 import torch.nn as nn
 import sys
 
-sys.path.append('/home/mei/nas/docker/thesis/model_train')
-from retnetModule.xpos_relative_position import XPOS
+sys.path.append('/home/mei/nas/docker/thesis/model_train/retnet')
+from retnet.retnetModule.xpos_relative_position import XPOS
 
 class SimpleRetention(nn.Module):
     def __init__(self, hidden_size, gamma, head_size=None, double_v_dim=False):

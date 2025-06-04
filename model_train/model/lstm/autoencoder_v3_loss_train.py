@@ -291,8 +291,9 @@ def train_joint(model, train_loader, val_loader, train_loader_for_p, device, opt
     for ep in range(start_epoch, epochs):
         
         kl_weight = min(ep / kl_warmup_epochs, 1.0)
-
-        print(f"[Joint] Ep{ep+1}: Calculating global target P...")
+        
+        if (ep+1) % 10 == 0 or (ep+1) == epochs:
+            print(f"[Joint] Ep{ep+1}: Calculating global target P...")
         model.eval()
         all_q_list_for_p_epoch = [] # 收集本 epoch所有有效的 q_soft_flat
         with torch.no_grad():

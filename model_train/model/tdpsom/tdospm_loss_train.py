@@ -578,135 +578,14 @@ import seaborn as sns # For prettier plots
 import pandas as pd
 import numpy as np
 
-def visualize_latent_space(model, data_loader, device, num_samples_to_plot=50, use_tsne=True, perplexity_tsne=30, labels_available=False, save_path=None):
-    """
-    可视化 VAE 潜空间的分布。
 
-    Args:
-        model: 训练好的 VAE 模型 (TSAutoencoder 实例)。
-        data_loader: DataLoader，提供数据。
-        device: "cuda" 或 "cpu"。
-        num_samples_to_plot: 要绘制的样本数量。
-        use_tsne: 是否使用 t-SNE (True) 或 PCA (False) 进行降维。
-        perplexity_tsne: t-SNE 的 perplexity 参数。
-        labels_available: 数据中是否有类别标签可用于着色。
-                           假设 DataLoader 返回 (x, lengths, original_labels_or_indices)
-                           如果 labels_available=True, 假设 original_labels_or_indices 是类别标签。
-        save_path: 保存图像的路径。
-    """
-    model.eval()
-    all_z_means = []
-    all_labels = [] # 如果有标签
-    count = 0
-
-    print(f"Extracting latent representations for {num_samples_to_plot} samples...")
-    with torch.no_grad():
-        for x_seq_batch, lengths_batch, _ ,other_info_batch  in data_loader:
-            if count >= num_samples_to_plot:
-                break
-
-            x_seq_batch = x_seq_batch.to(device)
-            lengths_batch = lengths_batch.to(device)
-            B, T_max, D_input = x_seq_batch.shape
-
-            # 我们只取每个序列的第一个时间步的潜表示作为示例
-            # 或者你可以对整个序列的潜表示取平均，或者选择特定的时间步
-            x_for_encoder_flat = x_seq_batch[:, 0, :].reshape(B, D_input) # (B, D_input)
-
-            z_dist_flat = model.encoder(x_for_encoder_flat)
-            z_mean_batch = z_dist_flat.mean.cpu() # (B, latent_dim)
-            all_z_means.append(z_mean_batch)
-
-            if labels_available:
-                # 假设 other_info_batch 是标签，或者可以从中提取标签
-                # 你可能需要根据你的数据调整这部分
-                if isinstance(other_info_batch, torch.Tensor):
-                    labels_batch = other_info_batch.cpu()
-                    # 如果标签是针对每个时间步的，也只取第一个时间步的
-                    if labels_batch.ndim > 1 and labels_batch.shape[0] == B : # e.g. (B, T_label_dims)
-                         all_labels.append(labels_batch[:,0] if labels_batch.shape[1] > 0 else labels_batch) # 取第一个时间步的标签
-                    else: # (B, label_dims) or (B,)
-                        all_labels.append(labels_batch)
-                else: # 如果是列表或其他格式
-                    try:
-                        all_labels.extend(list(other_info_batch[:B].numpy())) # 假设是numpy数组
-                    except:
-                        print("Warning: Could not process labels for visualization.")
-
-
-            count += z_mean_batch.shape[0]
-            if count >= num_samples_to_plot:
-                break
-    
-    if not all_z_means:
-        print("No latent representations extracted.")
-        return
-
-    latent_vectors = torch.cat(all_z_means, dim=0)[:num_samples_to_plot]
-    
-    if labels_available and all_labels:
-        true_labels = torch.cat(all_labels, dim=0)[:num_samples_to_plot]
-        if true_labels.ndim > 1 and true_labels.shape[1] > 1: # 如果是多维标签，选择一个维度
-            true_labels_for_plot = true_labels[:, 0].numpy()
-            print(f"Using first dimension of labels for coloring. Unique labels found: {np.unique(true_labels_for_plot)}")
-        else:
-            true_labels_for_plot = true_labels.squeeze().numpy()
-            print(f"Using labels for coloring. Unique labels found: {np.unique(true_labels_for_plot)}")
-
-    else:
-        true_labels_for_plot = None
-        print("No labels provided for coloring.")
-
-
-    print(f"Performing dimensionality reduction on {latent_vectors.shape[0]} latent vectors...")
-    if latent_vectors.shape[1] == 2:
-        latent_2d = latent_vectors.numpy()
-        reducer_name = "Original 2D Latent"
-    elif latent_vectors.shape[1] == 3 and not use_tsne: # 如果潜空间已经是3D且不用tSNE，可以考虑3D散点图
-        print("Latent space is 3D. Consider a 3D scatter plot or PCA to 2D.")
-        # For simplicity, we'll still reduce to 2D here.
-        reducer = PCA(n_components=2)
-        latent_2d = reducer.fit_transform(latent_vectors.numpy())
-        reducer_name = "PCA to 2D"
-    elif use_tsne:
-        reducer = TSNE(n_components=2, perplexity=perplexity_tsne, random_state=42,max_iter=300, init='pca', learning_rate='auto')
-        latent_2d = reducer.fit_transform(latent_vectors.numpy())
-        reducer_name = f"t-SNE (perplexity={perplexity_tsne})"
-    else:
-        reducer = PCA(n_components=2)
-        latent_2d = reducer.fit_transform(latent_vectors.numpy())
-        reducer_name = "PCA to 2D"
-    print("Dimensionality reduction complete.")
-
-    plt.figure(figsize=(10, 8))
-    if true_labels_for_plot is not None:
-        # 使用 pandas DataFrame 和 seaborn 以获得更好的图例和调色板
-        df_latent = pd.DataFrame({'Dim1': latent_2d[:, 0], 'Dim2': latent_2d[:, 1], 'Label': true_labels_for_plot})
-        num_unique_labels = len(df_latent['Label'].unique())
-        palette = sns.color_palette("hsv", num_unique_labels) if num_unique_labels > 10 else "deep"
-        
-        sns.scatterplot(x='Dim1', y='Dim2', hue='Label', palette=palette, data=df_latent, legend='full', s=50, alpha=0.7)
-        plt.legend(title='Label', bbox_to_anchor=(1.05, 1), loc='upper left')
-    else:
-        plt.scatter(latent_2d[:, 0], latent_2d[:, 1], s=50, alpha=0.5)
-    
-    plt.title(f"VAE Latent Space Visualization ({reducer_name})")
-    plt.xlabel("Dimension 1")
-    plt.ylabel("Dimension 2")
-    plt.grid(True, linestyle=':', alpha=0.6)
-    plt.tight_layout(rect=[0, 0, 0.85, 1] if true_labels_for_plot is not None else None) # 为图例留空间
-    
-    if save_path:
-        plt.savefig(save_path)
-        print(f"Latent space visualization saved to {save_path}")
-    plt.show()
     
     
 def analyze_latent_stats(model, data_loader, device, num_batches_to_analyze=10):
     model.eval()
     all_mus = []
     all_logvars = []
-    all_kls_per_sample = [] # 如果你想计算每个样本的KL
+    all_kls_per_sample = [] 
 
     print(f"Analyzing latent statistics for {num_batches_to_analyze} batches...")
     with torch.no_grad():
@@ -719,10 +598,7 @@ def analyze_latent_stats(model, data_loader, device, num_batches_to_analyze=10):
             B, T_max, D_input = x_seq_batch.shape
             
             x_for_encoder_flat = x_seq_batch.view(B * T_max, D_input)
-            # 注意：如果序列长度不同，你需要使用掩码只处理有效时间步
-            # _, mask_flat = model.generate_mask(T_max, lengths_batch.view(-1)) # 假设 lengths_batch 也是 B*T
-            # x_for_encoder_flat_valid = x_for_encoder_flat[mask_flat]
-            # 如果 generate_mask 输入的是 (B,) 的lengths, mask_flat 就是 (B*T_max)
+
             _, mask_flat_bool = model.generate_mask(T_max, lengths_batch)
             x_for_encoder_flat_valid = x_for_encoder_flat[mask_flat_bool]
 
@@ -885,3 +761,75 @@ def visualize_recons(model, data_loader, num_patients, feature_indices, feature_
             ax.legend(fontsize=6)
     plt.tight_layout()
     plt.show()
+    
+    
+from sklearn.manifold import TSNE
+import umap
+def collect_latents(model, data_loader, device, max_batches=20):
+    model.eval()
+    zs, ys = [], []
+    with torch.no_grad():
+        for i, (x, lengths, _, labels) in enumerate(data_loader):
+            if i >= max_batches:
+                break
+            x = x.to(device)
+            lengths = lengths.to(device)
+            labels = labels.to(device)
+
+            out = model(x, lengths, is_training=False)
+            # flat mu: (B*T_max, D_latent)
+            mu_flat = out["z_dist_flat"].mean  
+            B = x.size(0)
+            # 恢复成 (B, T_max, D_latent)
+            T_max = mu_flat.size(0) // B
+            D_latent = mu_flat.size(1)
+            mu_seq = mu_flat.view(B, T_max, D_latent)
+
+            for b in range(B):
+                valid_len = lengths[b].item()
+                zs.append(mu_seq[b, :valid_len, :].cpu())        # (valid_len, D_latent)
+                ys.append(labels[b].repeat(valid_len).cpu())     # (valid_len,)
+
+    z_all = torch.cat(zs, dim=0).numpy()  # (N, D_latent)
+    y_all = torch.cat(ys, dim=0).numpy()  # (N,)
+    print(f"z_all shape: {z_all.shape}, y_all shape: {y_all.shape}")
+    return z_all, y_all
+
+
+def plot_tsne(z_all, y_all, perplexity=15):
+    tsne = TSNE(n_components=2, perplexity=perplexity, init='pca', random_state=42)
+    z_2d = tsne.fit_transform(z_all)
+
+    plt.figure(figsize=(8, 6))
+    sns.scatterplot(x=z_2d[:,0], y=z_2d[:,1], hue=y_all, palette="tab10", s=15, alpha=0.7)
+    plt.title("t-SNE Visualization of Latent Space")
+    plt.xlabel("z[0]"); plt.ylabel("z[1]")
+    plt.legend(title="Label", bbox_to_anchor=(1.05, 1), loc='upper left')
+    plt.tight_layout()
+    plt.show()
+    
+
+
+def plot_umap(z_all, y_all, n_neighbors=15, min_dist=0.1, metric='euclidean'):
+    reducer = umap.UMAP(
+        n_neighbors=n_neighbors,
+        min_dist=min_dist,
+        metric=metric,
+        random_state=42
+    )
+    z_2d = reducer.fit_transform(z_all)
+
+    df = pd.DataFrame({
+        "x": z_2d[:, 0],
+        "y": z_2d[:, 1],
+        "label": y_all
+    })
+
+    plt.figure(figsize=(8, 6))
+    sns.scatterplot(data=df, x="x", y="y", hue="label", palette="tab10", s=15, alpha=0.7)
+    plt.title("UMAP Visualization of Latent Space")
+    plt.xlabel("UMAP-1")
+    plt.ylabel("UMAP-2")
+    plt.legend(title="Label")
+    plt.tight_layout()
+    plt.show()    

@@ -489,7 +489,7 @@ def collect_latents(model, data_loader, device, max_batches=20):
             labels = labels.to(device)
 
             out = model(x, lengths, is_training=False)
-            z_mu = out["z_dist_seq"].mean  # shape: (B, T, D)
+            z_mu = out["z_dist_seq"].mean  # shape: (B, T, D), decoder 输出的 z_mu
             B, T, D = z_mu.shape
 
             for b in range(B):

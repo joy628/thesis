@@ -91,7 +91,7 @@ def train_vae(model, train_loader, device, optimizer, start,epochs, save_dir, pa
         total_epoch_recon_loss = 0.0
         total_epoch_kl_loss = 0.0
         
-        for x_seq, lengths, _,_ in train_loader: # DataLoader for training yields (data, lengths, original_indices)
+        for x_seq, lengths, _,cat in train_loader: # DataLoader for training yields (data, lengths, original_indices)
             
             optimizer.zero_grad()
             x_seq, lengths = x_seq.to(device), lengths.to(device)
@@ -100,7 +100,7 @@ def train_vae(model, train_loader, device, optimizer, start,epochs, save_dir, pa
             
             
             
-            outputs = model(x_seq, lengths, is_training=True) # is_training affects BN/Dropout in VAE
+            outputs = model(x_seq, cat,lengths, is_training=True) # is_training affects BN/Dropout in VAE
             
             check_nan_in_dist(outputs["recon_dist_seq"], "recon_dist")
             check_nan_in_dist(outputs["z_dist_seq"], "z_dist")
@@ -199,14 +199,15 @@ def train_som(  model,  train_loader,  device,  max_epochs: int, save_dir: str,p
             model.som_layer.train()
             
             total_epoch_loss = 0.0
-            for x_seq, lengths, _ ,_ in train_loader:
+            for x_seq, lengths, _ ,cat in train_loader:
                 x_seq, lengths = x_seq.to(device), lengths.to(device)
+                cat = cat.to(device)
                 B, T_max, D_input = x_seq.shape
                 
                 optimizer.zero_grad()
                 
                 with torch.no_grad(): # Get z_e from frozen VAE encoder
-                    outputs_vae = model(x_seq, lengths, is_training=False) #
+                    outputs_vae = model(x_seq, cat,lengths, is_training=False) #
                     z_e_sample = outputs_vae["z_e_sample_seq"]  # shape: [B, T, D]
                     _, mask_flat_bool = model.generate_mask(T_max, lengths)  # [B, T] and [B*T]
                     z_e_sample_flat = z_e_sample.reshape(B * T_max, -1)  # [B*T, D]
@@ -282,7 +283,7 @@ def train_joint(model, train_loader, val_loader, train_loader_for_p, device, opt
     
 
     
-    ### 1. 初始化与 patient 偏移量计算
+    ### 1. 构建 患者的全局 时间步偏移字典
     patient_start_offset_global_dict = build_patient_start_offset_dict(train_loader_for_p)
 
     # 2. 
@@ -291,21 +292,23 @@ def train_joint(model, train_loader, val_loader, train_loader_for_p, device, opt
     for ep in range(start_epoch, epochs):
         
         kl_weight = min(ep / kl_warmup_epochs, 1.0)
-
-        print(f"[Joint] Ep{ep+1}: Calculating global target P...")
+        if (ep+1) % 10 == 0 or (ep+1) == epochs:
+            print(f"[Joint] Ep{ep+1}: Calculating global target P...")
         model.eval()
         all_q_list_for_p_epoch = []
         with torch.no_grad():
-            for x_p_batch, lengths_p_batch, _, _ in tqdm(train_loader_for_p, desc=f"[Joint E{ep+1}] Calc Global P", leave=False):
+            for x_p_batch, lengths_p_batch, _, cat in tqdm(train_loader_for_p, desc=f"[Joint E{ep+1}] Calc Global P", leave=False):
                 x_p_batch, lengths_p_batch = x_p_batch.to(device), lengths_p_batch.to(device)
-                outputs_p_calc = model(x_p_batch, lengths_p_batch, is_training=False)
+                cat = cat.to(device)
+                outputs_p_calc = model(x_p_batch, cat,lengths_p_batch, is_training=False)
                 
                 _, mask_p_flat_bool = model.generate_mask(x_p_batch.size(1), lengths_p_batch)
                 
                 q_for_p_batch_valid = outputs_p_calc["q_soft_flat"][mask_p_flat_bool]
                 all_q_list_for_p_epoch.append(q_for_p_batch_valid.cpu())
                 
-        q_train_all_valid_timesteps_epoch = torch.cat(all_q_list_for_p_epoch, dim=0)
+        q_train_all_valid_timesteps_epoch = torch.cat(all_q_list_for_p_epoch, dim=0) # 一个epoch内 收集所有病人的 q
+        
         p_target_train_global_flat_current_epoch = model.compute_target_distribution_p(q_train_all_valid_timesteps_epoch).to(device)
         
         if (ep+1) % 10 == 0 or (ep+1) == epochs:
@@ -315,9 +318,10 @@ def train_joint(model, train_loader, val_loader, train_loader_for_p, device, opt
         current_epoch_losses = {key: 0.0 for key in history if 'train_' in key}
         
     
-        for x_seq, lengths, original_indices_batch, _ in train_loader:
+        for x_seq, lengths, original_indices_batch, cat in train_loader:
             x_seq, lengths = x_seq.to(device), lengths.to(device)
             original_indices_batch = original_indices_batch.to(device)
+            cat = cat.to(device) 
             B_actual, T_actual_max, D_input = x_seq.shape
             mask_seq, mask_flat_bool = model.generate_mask(T_actual_max, lengths)
 
@@ -338,7 +342,7 @@ def train_joint(model, train_loader, val_loader, train_loader_for_p, device, opt
             #     p_batch_target_valid_timesteps = torch.ones(num_valid_steps, model.som_layer.n_nodes, device=device) / model.som_layer.n_nodes
 
             optimizer.zero_grad()
-            outputs = model(x_seq, lengths, is_training=True)
+            outputs = model(x_seq,cat, lengths, is_training=True)
             q_soft_flat_valid = outputs["q_soft_flat"][mask_flat_bool]
             q_soft_flat_ng_valid = outputs["q_soft_flat_ng"][mask_flat_bool]
 
@@ -364,7 +368,7 @@ def train_joint(model, train_loader, val_loader, train_loader_for_p, device, opt
             loss_smooth = model.compute_loss_smoothness(
               z_e_sample_seq, bmu_indices_flat, model.alpha_som_q, mask_seq
         )
-            pred_z_dist_flat = outputs["pred_z_dist_seq"] 
+            pred_z_dist_flat = outputs["pred_z_dist_flat"] 
             
             loss_pred = model.compute_loss_prediction(pred_z_dist_flat, outputs["z_e_sample_seq"], mask_flat_bool)
 
@@ -387,18 +391,19 @@ def train_joint(model, train_loader, val_loader, train_loader_for_p, device, opt
         model.eval()
         total_epoch_loss_val = 0.0
         with torch.no_grad():
-            for x_seq_val, lengths_val, _, _ in val_loader:
+            for x_seq_val, lengths_val, _, cat_val in val_loader:
                 x_seq_val, lengths_val = x_seq_val.to(device), lengths_val.to(device)
+                cat_val = cat_val.to(device)
                 B_val, T_val_max, D_input = x_seq_val.shape
                 mask_seq, mask_flat_val = model.generate_mask(T_val_max, lengths_val)
-                outputs_val = model(x_seq_val, lengths_val, is_training=False)
+                outputs_val = model(x_seq_val, cat_val,lengths_val, is_training=False)
                 
                 loss_elbo_val, _, _ = model.compute_loss_reconstruction_ze(x_seq_val, outputs_val["recon_dist_seq"], outputs_val["z_dist_seq"], kl_weight,  mask_seq)
                 
                 loss_smooth_val = model.compute_loss_smoothness(outputs_val["z_e_sample_seq"], outputs_val["bmu_indices_flat_for_smooth"], model.alpha_som_q, mask_seq)
                 
                 
-                pred_z_dist_flat = outputs_val["pred_z_dist_seq"]
+                pred_z_dist_flat = outputs_val["pred_z_dist_flat"]
     
                 
                 loss_pred_val = model.compute_loss_prediction( pred_z_dist_flat, outputs_val["z_e_sample_seq"],mask_flat_val)
@@ -454,7 +459,7 @@ def initialize_som_from_data(model, dataloader, device, som_dim, num_classes, sa
     with torch.no_grad():
         for x, lengths, _, labels in dataloader:  # 注意：第三项是 id，最后是 label
             x, lengths, labels = x.to(device), lengths.to(device), labels.to(device)
-            out = model(x, lengths, is_training=False)
+            out = model(x, labels,lengths, is_training=False)
 
             z_seq = out['z_e_sample_seq']  # [B, T, D]
 
@@ -488,7 +493,7 @@ def collect_latents(model, data_loader, device, max_batches=20):
             lengths = lengths.to(device)
             labels = labels.to(device)
 
-            out = model(x, lengths, is_training=False)
+            out = model(x, labels,lengths, is_training=False)
             z_mu = out["z_dist_seq"].mean  # shape: (B, T, D), decoder 输出的 z_mu
             B, T, D = z_mu.shape
 
@@ -550,14 +555,15 @@ def analyze_latent_stats(model, data_loader, device, num_batches_to_analyze=20):
     all_kls_per_sample = []
 
     with torch.no_grad():
-        for batch_idx, (x_seq_batch, lengths_batch, _, _) in enumerate(data_loader):
+        for batch_idx, (x_seq_batch, lengths_batch, _, label) in enumerate(data_loader):
             if batch_idx >= num_batches_to_analyze:
                 break
 
             x_seq_batch = x_seq_batch.to(device)
             lengths_batch = lengths_batch.to(device)
+            label = label.to(device)
 
-            outputs = model(x_seq_batch, lengths_batch, is_training=False)
+            outputs = model(x_seq_batch, label,lengths_batch, is_training=False)
             z_dist = outputs["z_dist_seq"]  # Shape: (B, T, D)
             z_mu = z_dist.mean
             z_logvar = z_dist.stddev.pow(2).log()
@@ -628,11 +634,12 @@ def compute_som_activation_heatmap(model, data_loader, device):
     activation_counts = torch.zeros(n_nodes, dtype=torch.int32)
 
     with torch.no_grad():
-       for x_seq, lengths, _ ,_ in data_loader:
+       for x_seq, lengths, _ ,cat in data_loader:
             x_seq = x_seq.to(device)
             lengths = lengths.to(device)
+            cat = cat.to(device)
 
-            outputs = model(x_seq, lengths, is_training=False)
+            outputs = model(x_seq,cat, lengths, is_training=False)
             bmu_indices = outputs["bmu_indices_flat"]  # (B*T,)
 
             # Count BMU indices
@@ -661,13 +668,14 @@ def visualize_recons(model, data_loader, num_patients, feature_indices, feature_
     model.eval()
     with torch.no_grad():
         # 1. 取一批数据
-        x, lengths, _,_ = next(iter(data_loader))  
+        x, lengths, _,cat = next(iter(data_loader))  
         x = x.to(device)
         lengths = lengths.to(device)
+        cat = cat.to(device)
         B, T_max, D_input = x.shape
 
         # 2. 获取模型输出并 reshape 重建结果
-        outputs = model(x, lengths, is_training=False)
+        outputs = model(x, cat,lengths, is_training=False)
         if hasattr(outputs["recon_dist_seq"], 'mean'):
            x_hat = outputs["recon_dist_seq"].mean 
         if x_hat.ndim == 2 and x.ndim == 3: # 如果 mean 返回的是扁平化的 (B*T, D)

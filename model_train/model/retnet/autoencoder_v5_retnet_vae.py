@@ -8,31 +8,6 @@ import sys
 sys.path.append('/home/mei/nas/docker/thesis/model_train/model')
 from  retnet.retnetModule.retnet import RetNet
 
-
-
-class ConditionalPrior(nn.Module):
-    def __init__(self, y_dim, latent_dim):
-        super().__init__()
-        self.fc = nn.Sequential(
-            nn.Linear(y_dim, 128),
-            nn.ReLU(),
-            nn.Linear(128, latent_dim * 2)
-        )
-        self.latent_dim = latent_dim
-
-    def forward(self,x,y):
-        y_onehot = F.one_hot(y, num_classes=4).float()  # (B, 4)
-        h = self.fc(y_onehot)  # (B, 2*latent_dim)
-        mu, logvar = torch.chunk(h, 2, dim=-1)
-        std = F.softplus(0.5 * logvar) + 1e-3
-        
-        _,T,_ = x.shape
-        mu = mu.unsqueeze(1).expand(-1, T, -1)  # (B, T, latent_dim)
-        std = std.unsqueeze(1).expand(-1, T, -1)  # (B, T, latent_dim)
-        
-        return Independent(Normal(loc=mu, scale=std), 1)  # (B, T ,latent_dim)
-    
-
 class RetNetEncoder(nn.Module):
     def __init__(self, input_dim, latent_dim, y_dim=4, hidden_dim=256, layers=1, ffn_size=256, heads=2):
         super().__init__()
@@ -41,8 +16,6 @@ class RetNetEncoder(nn.Module):
         self.norm = nn.LayerNorm(hidden_dim)
         self.mu_proj = nn.Linear(hidden_dim, latent_dim)
         self.logvar_proj = nn.Linear(hidden_dim, latent_dim)
-        self.prior_net = ConditionalPrior(y_dim=4, latent_dim=latent_dim)
-
 
     def forward(self, x, y,lengths=None):
         # x: (B, T, input_dim)
@@ -55,15 +28,11 @@ class RetNetEncoder(nn.Module):
         h= self.norm(h)
         mu = self.mu_proj(h)         # → (B, T, latent_dim)
         raw_logvar = self.logvar_proj(h)         # (B, T, latent_dim)
-        std = F.softplus(0.5 * raw_logvar) + 1e-3 
+        std = F.softplus(0.5 * raw_logvar) + 1e-5 
         
         # D维 每个维度构造一个独立的一维正态分布 shape (B, T, latent_dim)
         distr = Independent(Normal(loc=mu, scale=std), 1)
-        
-        ## learnbale prior
-        prior_dist = self.prior_net(x,y)  # shape (B, latent_dim)
- 
-        return  distr , prior_dist # Return both q(z|x) and prior p(z|y)
+        return  distr  
     
     
 class RetNetDecoder(nn.Module):
@@ -86,7 +55,7 @@ class RetNetDecoder(nn.Module):
         mu = self.out_mu(h)                  # (B, T, output_dim)
 
         raw_logvar = self.out_logvar(h)      # (B, T, output_dim)
-        std = F.softplus(0.5 * raw_logvar) + 1e-3  # Replace exp for numerical stability
+        std = F.softplus(0.5 * raw_logvar) + 1e-5  # Replace exp for numerical stability
 
         recon_distr = Independent(Normal(mu, std), 1)
         return recon_distr
@@ -223,7 +192,7 @@ class TSAutoencoder(nn.Module):
         B, T_max, _ = x_input_seq.shape
         
         # 2. get latent distribution q(z|x) from encoder
-        z_dist_seq, prior_distr = self.encoder(x_input_seq,y,lengths) # [b, T_max, D_latent] 
+        z_dist_seq = self.encoder(x_input_seq,y,lengths) # [b, T_max, D_latent] 
         
         # 3. Sample z_e from the distribution
         if is_training:
@@ -267,7 +236,6 @@ class TSAutoencoder(nn.Module):
         # Prepare outputs
         outputs = {
             "z_dist_seq": z_dist_seq,               # q(z|x) for each timestep，[B, T_max, D_latent]
-            "prior_dist_seq": prior_distr,             # p(z|y) prior distribution
             "z_e_sample_flat": z_e_sample_flat,         # Sampled z for each timestep
             "z_e_sample_seq": z_e_sample_seq,           # Sampled z, reshaped to (B, T, D)
             "recon_dist_seq": recon_dist_seq,         # p(x_hat|z) for each timestep
@@ -314,19 +282,17 @@ class TSAutoencoder(nn.Module):
     
 
     
-    def compute_loss_reconstruction_ze(self, x_input_seq_true, recon_dist_seq, z_dist_seq, prior_distr_seq, prior_beta_vae, mask_seq):
+    def compute_loss_reconstruction_ze(self, x_input_seq_true, recon_dist_seq, z_dist_seq, prior_beta_vae, mask_seq):
         """
         x_input_seq_true: (B, T_max, D_features)
         recon_dist_seq: IndependentNormal for p(x_hat_t|z_t), batch_shape=(B, T_max), event_shape=(D_input,)
         z_dist_seq: IndependentNormal for q(z_t|x_t), batch_shape=(B, T_max), event_shape=(D_latent,)
         prior_beta_vae: scalar, weight for KL term
         mask_seq: (B, T_max), boolean or float
-        prior_distr_seq: IndependentNormal for p(z|y), batch_shape=(B,T)event_shape=(D_latent,)
         """
         # Reconstruction Loss (log likelihood) 
         
         # 1）log‐likelihood per‐timestep → (B,T)    
-        # D = x_input_seq_true.size(-1)
         log_p = recon_dist_seq.log_prob(x_input_seq_true)
         mask_f = mask_seq.float()
         
@@ -337,7 +303,12 @@ class TSAutoencoder(nn.Module):
         recon_loss = - per_seq_lp.mean()
         
         # KL Divergence
-        kl_t = kl_divergence(z_dist_seq, prior_distr_seq)        # (B,T)
+        # Create prior: N(0,I) for each z_t. batch_shape=(B, T_max), event_shape=(D_latent,)
+
+        # kl_divergence(z_dist_seq, prior_dist) will have shape (B, T_max)
+        prior = Independent(Normal(torch.zeros_like(z_dist_seq.mean),
+                                torch.ones_like(z_dist_seq.stddev)), 1)
+        kl_t = kl_divergence(z_dist_seq, prior)        # (B,T)
         per_seq_kl = (kl_t * mask_f).sum(dim=1) / mask_f.sum(dim=1).clamp(min=1)
         kl_loss = per_seq_kl.mean()
         
@@ -476,6 +447,3 @@ class TSAutoencoder(nn.Module):
         z_e_expanded = z_e_detached.unsqueeze(1).expand_as(z_q_neighbors_stacked_flat)
         
         return F.mse_loss(z_e_expanded, z_q_neighbors_stacked_flat)
-
-
-

@@ -140,39 +140,6 @@ class RiskPredictor(nn.Module):
         return torch.sigmoid(output).squeeze(-1)  # [B, T], sigmoid for risk scores 
     
     
-class MortalityPredictor(nn.Module):
-    def __init__(self, fused_dim, ts_dim, hidden_dim=512, dropout=0.3):
-        super().__init__()
-        
-        self.input_dim = fused_dim + ts_dim
-        self.fc = nn.Sequential(
-            nn.Linear(self.input_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim),
-            nn.ReLU(inplace=True),
-            nn.Dropout(dropout),
-            
-            nn.Linear(hidden_dim, hidden_dim // 2),
-            nn.LayerNorm(hidden_dim // 2),
-            nn.ReLU(inplace=True),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim // 2, 1) 
-        )
-        
-        for m in self.fc:
-            if isinstance(m, nn.Linear):
-                nn.init.kaiming_uniform_(m.weight, a=0.2)
-                if m.bias is not None:
-                    nn.init.zeros_(m.bias)
-            
-
-    def forward(self, fused,ts):
-        fused_exp = fused.unsqueeze(1).expand(-1, ts.size(1), -1)  # [B, T, fused_dim]
-        x = torch.cat([fused_exp, ts], dim=2)                      # [B, T, fused_dim + ts_dim]      
-        logits = self.fc(x)           # [B,1]
-        prob = torch.sigmoid(logits)   # [B,1]
-        
-        return prob.squeeze(-1)        # [B]
-
 # === Full Model ===
 class PatientOutcomeModel(nn.Module):
     def __init__(self, flat_input_dim, graph_input_dim, hidden_dim,som=None, pretrained_encoder=None):
@@ -195,9 +162,7 @@ class PatientOutcomeModel(nn.Module):
         
         self.fusion = FeatureAttentionFusion(hidden_dim, hidden_dim)
         
-        
         self.risk_predictor = RiskPredictor(hidden_dim, hidden_dim)     
-        self.mortality_predictor = MortalityPredictor(hidden_dim,hidden_dim)
             
 
     def forward(self, flat_data, graph_data, ts_data,cat,length=None):
@@ -220,11 +185,8 @@ class PatientOutcomeModel(nn.Module):
 
         # === TS Embedding ===
         ts_emb= self.ts_encoder(ts_data,cat,length)  # [B, T, D]        
-            
-        #  === Mortality Prediction === #  model 1 分开
-        mortality_prob = self.mortality_predictor(fused_static,ts_emb)
-        
-        # === Risk Prediction ===  model 2 分开
+                
+        # === Risk Prediction ===  
         risk_scores = self.risk_predictor(fused_static, ts_emb,length)  # [B, T]
         
         # === som ======
@@ -236,7 +198,6 @@ class PatientOutcomeModel(nn.Module):
         return {
                 "risk_scores": risk_scores,
                 "z_e_seq": ts_emb,
-                "mortality_prob": mortality_prob,
                 "aux_info": aux_info
                 }
         

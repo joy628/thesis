@@ -165,30 +165,21 @@ def train_patient_outcome_model(model,
             
             loss_s_som = model.compute_loss_s_som(q_soft_flat_valid, q_soft_flat_ng_valid)
              
-            # === som smoothness loss ===
+            # === 1.som smoothness loss ===
             z_e_sample_seq = output["z_e_seq"]
             bmu_indices_flat = output["aux_info"]["bmu_indices_flat"] # shape: (B*T_max,)
             loss_smooth = model.compute_loss_smoothness(
               z_e_sample_seq, bmu_indices_flat, model.alpha_som_q, mask_seq)
             
-            ## ===1. prediction loss
+            ## ===2. prediction loss
             risk_scores_pred = output["risk_scores"] # (B, T)
             mask_seq_risk_bool, _ = model.generate_mask(ts_data.size(1), ts_lengths)
             mask_seq_risk = mask_seq_risk_bool.float()
             loss_risk_elementwise = bce_loss_fn(risk_scores_pred, y_risk_true) # (B, T)
             loss_risk = (loss_risk_elementwise * mask_seq_risk).sum() / mask_seq_risk.sum().clamp(min=1) 
-            ## ===2. mortality prediction loss
-            mortality_prob_pred = output["mortality_prob"] # (B, T)
-            
-            if mortality_prob_pred.dim() > 1:
-                 prob_last = mortality_prob_pred[:, -1]
-            else:
-                prob_last = mortality_prob_pred.squeeze(-1)
-                
-            loss_mortality = F.binary_cross_entropy(prob_last, y_mortality_true.float())
 
 
-            total_loss = theta * loss_risk + gamma * loss_cah + beta * loss_s_som + kappa * loss_smooth + eta * loss_mortality
+            total_loss = theta * loss_risk + gamma * loss_cah + beta * loss_s_som + kappa * loss_smooth 
             total_loss.backward()
             optimizer.step()
 
@@ -197,7 +188,6 @@ def train_patient_outcome_model(model,
             current_epoch_losses['train_cah'] += loss_cah.item()
             current_epoch_losses['train_s_som'] += loss_s_som.item()
             current_epoch_losses['train_smooth'] += loss_smooth.item()
-            current_epoch_losses['train_mortality'] += loss_mortality.item()
 
         for key in current_epoch_losses:
             history[key].append(current_epoch_losses[key] / len(train_loader))
@@ -211,50 +201,37 @@ def train_patient_outcome_model(model,
                 
                 flat_data, ts_data, ts_lengths = flat_data.to(device), ts_data.to(device), ts_lengths.to(device)
                 graph_data = graph_data.to(device)
-                categories = categories.to(device)
-                
-                y_risk_true, y_mortality_true =risk.to(device),mortality.to(device)
-                
-                
+                categories = categories.to(device)                
+                y_risk_true =risk.to(device)
+                                
                 output_val = model(flat_data, graph_data, ts_data, categories,ts_lengths)
                 
-                # === som loss 
-                
+                # === som loss                
                 mask_seq_risk_bool, _ = model.generate_mask(ts_data.size(1), ts_lengths)
                 mask_seq_risk = mask_seq_risk_bool.float()
                 
                 
                 loss_smooth_val = model.compute_loss_smoothness(output_val["z_e_seq"], output_val["aux_info"]["bmu_indices_flat"], model.alpha_som_q,mask_seq_risk)                
                 
-                # === 1. prediction loss
+                # === 2. prediction loss
                 risk_scores_pred = output_val["risk_scores"] # (B, T)
                 
                 loss_risk_elementwise = bce_loss_fn(risk_scores_pred, y_risk_true) # (B, T)
                 loss_risk = (loss_risk_elementwise * mask_seq_risk).sum() / mask_seq_risk.sum().clamp(min=1) 
                 # per risk
                 per_risk = (loss_risk_elementwise * mask_seq_risk).sum(dim=1) / mask_seq_risk.sum(dim=1).clamp(min=1)
-                
-                
-                ## ===2. mortality prediction loss
-                mortality_prob_pred = output_val["mortality_prob"] # (B, 1) or (B)
-                            
-                if mortality_prob_pred.dim() > 1:
-                    prob_last = mortality_prob_pred[:, -1]
-                else:
-                    prob_last = mortality_prob_pred.squeeze(-1)
-                    
-                loss_mortality_el = F.binary_cross_entropy(prob_last, y_mortality_true.float())
-                
-                loss_mortality = (loss_mortality_el* mask_seq_risk).sum() / mask_seq_risk.sum().clamp(min=1) 
-                
-                # per mortality
-                per_mort = (loss_mortality * mask_seq_risk).sum(dim=1) / mask_seq_risk.sum(dim=1).clamp(min=1)
                  
-                total_epoch_loss_val += (loss_risk + loss_mortality+loss_smooth_val).item()
-                per_patient_losses += (per_risk + per_mort).cpu().tolist()
+                total_epoch_loss_val += (loss_risk +loss_smooth_val).item()
+                per_patient_losses += (per_risk).cpu().tolist()
                 per_patient_cats   += categories.cpu().tolist()
-                
-                    
+        
+        ## print val loss
+        if (ep + 1) % 10 == 0:
+            print(f"[Joint] Epoch {ep + 1}/{epochs} - "
+                f"Train Loss: {current_epoch_losses['train_loss'] / len(train_loader):.4f}, "
+                f"Risk Loss: {current_epoch_losses['train_risk'] / len(train_loader):.4f}, "
+                f"Val Loss: {total_epoch_loss_val / len(val_loader):.4f}") 
+                   
 
         avg_val_loss = total_epoch_loss_val / len(val_loader)
         history['val_loss'].append(avg_val_loss)

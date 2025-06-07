@@ -1,0 +1,743 @@
+[33mcommit 83848d796b8869015a6f79747af46a4d26faadff[m[33m ([m[1;36mHEAD -> [m[1;32mmain[m[33m, [m[1;31morigin/main[m[33m, [m[1;31morigin/HEAD[m[33m)[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Fri Jun 6 10:18:26 2025 +0200
+
+    fixed risk score function for resmapled 15,30,60min
+
+[33mcommit f2556197158d5d3ded94697833a392432d450a84[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Fri Jun 6 01:54:42 2025 +0200
+
+    train final model risk and mortality
+
+[33mcommit 4eda1c61fbc0ff53c51179dd4de5cb90ca7a7e69[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Fri Jun 6 01:52:54 2025 +0200
+
+    train final model risk and mortality
+
+[33mcommit dc4719d4d75798bd2b6645212d63ed37f1d3ad8b[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Wed Jun 4 18:44:14 2025 +0200
+
+    pretrain with retnet vae, resampled 60min
+
+[33mcommit 0454a3b517c9ef08aadc8841c21fb80f84f3cd39[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Wed Jun 4 10:55:13 2025 +0200
+
+    pretrain model with resampled to 1hour and compare with retnet, lstm, vae model
+
+[33mcommit b6e41049a367b20d9b9c0462a8d3e5467146f57e[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Wed Jun 4 10:17:10 2025 +0200
+
+    pretrain model with resampled to 1hour and compare with retnet, lstm, vae model
+
+[33mcommit 844698b3149e2e2d9e59129fe5577f45428b34a2[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Tue Jun 3 23:14:38 2025 +0200
+
+    organize model structure
+
+[33mcommit 65020c4d671cb0d76613652f4a9c827b9ed80fc1[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Tue Jun 3 14:34:44 2025 +0200
+
+    build dataloader for resampling
+
+[33mcommit 18def6d04ff84b0374c5063399e6060ffccd2dc0[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Tue Jun 3 12:16:41 2025 +0200
+
+    count patient for each level after resample
+
+[33mcommit ff5651fb7839d7da6e0844fbc49e487e226962be[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Tue Jun 3 11:33:08 2025 +0200
+
+    resample ts data to 15min, 30min and 1 hour
+
+[33mcommit 6981d9f8bfadb829343c5c2a2fb7a3169f4dca9f[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Mon Jun 2 23:40:11 2025 +0200
+
+    pretrain ts model via lstm, vae, retnet
+
+[33mcommit c0b4f3f824c61bae3c4951d9e6667ebaaf043fb6[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Mon May 19 23:02:51 2025 +0200
+
+    adjust final model and train function
+
+[33mcommit afaacac386d9e0c2e513a1df111e94a7b71abb0d[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Mon May 19 21:46:55 2025 +0200
+
+    build dataloade for graph and non graph data
+
+[33mcommit 7405276b6971df5b18b27758a1ddb56c755a197a[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Mon May 19 00:42:41 2025 +0200
+
+    build dataloade for graph and non graph data
+
+[33mcommit 40ea4e54914ad63890aa4dbdf64574dfa3046910[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Mon May 19 00:41:27 2025 +0200
+
+    build dataloade for graph and non graph data
+
+[33mcommit 6d097d27f2aeae41b82ba0b33efaad69be031f6a[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Sun May 18 22:18:24 2025 +0200
+
+    create diagnosis graph for each patient
+
+[33mcommit 56d199eb83dd471c7c50d0dc84195ce556ae12d2[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Sun May 18 22:08:59 2025 +0200
+
+    create diagnosis graph for each patietn
+
+[33mcommit ae1dc1cab77114befc030ea5da1659eaf52986f4[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Sat May 17 22:41:51 2025 +0200
+
+    cut diagnosis to two level
+
+[33mcommit f46a0c67e5304c2314e81c644d80eba984a08711[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Thu May 15 22:47:59 2025 +0200
+
+    cut diagnosis to two level
+
+[33mcommit 44336b93cafcf28de9b885795f83e8ab3d6e8611[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Wed May 14 16:01:07 2025 +0200
+
+    add mortality label to dataloader
+
+[33mcommit a88d170a36835e48ceaaf56600b67f256e836f52[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Mon May 12 08:19:08 2025 +0200
+
+    final model
+
+[33mcommit 0967dda718847a9d7668ef9952ab2c9637440463[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Sat May 10 23:53:17 2025 +0200
+
+    final model with rnn baseline
+
+[33mcommit e256e8ba8e165ff3de1112277ffd3aa8e5bdbc55[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Sat May 10 23:46:59 2025 +0200
+
+    final model with ae2
+
+[33mcommit bb0d6036d4de7be0bb2e8128605c5ab7be69cc31[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Sat May 10 09:23:27 2025 +0200
+
+    autoencoder version2
+
+[33mcommit ea20770115757144c64edbea84d5dcd1a0ae7e45[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Sat May 3 17:39:15 2025 +0200
+
+    rnn and lstm baseline
+
+[33mcommit ab8e17763d68fd9e95e09d4a74227ce198349403[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Tue Apr 29 20:05:38 2025 +0200
+
+    lstmbaseline and autoencoder version3
+
+[33mcommit 1c721c3ecbc6cd35386919c0ce56f1db4d788c6f[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Thu Apr 24 20:33:19 2025 +0200
+
+    autoencoder version3
+
+[33mcommit 0fc04ae2449cf70ab6b8a1139573016984edcb5d[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Tue Apr 22 22:27:51 2025 +0200
+
+    pre train autoencoder version 2
+
+[33mcommit e7f258ace801c3fbf8cea6952fdb9ee50fe1ed81[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Sat Apr 19 10:43:13 2025 +0200
+
+    baseline lstm
+
+[33mcommit ff2b5240c9d8275f7d514656cd6743eae9d4cce1[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Thu Apr 17 12:44:49 2025 +0200
+
+    final model
+
+[33mcommit 18bc2f2931f27d6cf9c0c9e8b459d438f0ad551b[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Mon Apr 14 22:53:00 2025 +0200
+
+    final model
+
+[33mcommit a3c4eac8c24a955ce24160fe94c1ba8fd2642cd6[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Thu Apr 10 21:03:42 2025 +0200
+
+    pre train autoencoder
+
+[33mcommit 77c3617efc314d98b5762b3d4ea034f0c1094ec9[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Wed Apr 9 15:33:50 2025 +0200
+
+    pre train autoencoder
+
+[33mcommit 3946229f45fe6a539b39085b13fc04b79abd6f7f[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Sun Mar 16 15:37:35 2025 +0100
+
+    overfit model
+
+[33mcommit 9c1a11b02ff7c06f45f70631c0d8c670b27b8317[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Fri Mar 14 15:18:30 2025 +0100
+
+    overfit model
+
+[33mcommit 6c5c3378357eaf8f734e1bfec2ab4146a043e019[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Fri Mar 14 15:08:41 2025 +0100
+
+    overfit model
+
+[33mcommit ec62c20c8bffa018d9b2211c217ed504bd436d54[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Fri Mar 14 12:25:18 2025 +0100
+
+    overfit model
+
+[33mcommit 1c732e0a6a51d7de3b022390aab69583cbd5dd2d[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Thu Mar 13 22:40:06 2025 +0100
+
+    overfit model
+
+[33mcommit 02b433946b28a42ca823ab7b3d80eb8d6a40f24d[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Wed Mar 12 23:41:43 2025 +0100
+
+    overfit model
+
+[33mcommit a03b829e9bba3c7be47b5e556e8ccae1787c72b3[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Tue Mar 11 00:11:12 2025 +0100
+
+    test the pre trained ts ae
+
+[33mcommit bc69e37c27a5b70e3709bb649a5f2dc5ff0a52fa[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Tue Mar 11 00:10:55 2025 +0100
+
+    test the pre trained ts ae
+
+[33mcommit 03dbf6954ac82c537cb626bc97a0f0a0b2f5f48f[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Sun Mar 9 23:19:25 2025 +0100
+
+    pre train ts ae with the best params
+
+[33mcommit 48f785d082a9eb1a363359b194afd9e5b6085cd5[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Sun Mar 9 23:13:14 2025 +0100
+
+    plot loss of pre train autoencoder
+
+[33mcommit e430bf096863682fe13dcf71a2c7995e9fe379bb[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Sun Mar 9 13:29:09 2025 +0100
+
+     pre train autoencoder to find lr
+
+[33mcommit 6054cea871b1a42faa64bfb5c90d13de3abd4dc4[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Sun Mar 9 09:41:34 2025 +0100
+
+     pre train autoencoder to find lr
+
+[33mcommit 96f56506902849fa8de9680fa84fb59a46f95520[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Sat Mar 8 09:27:27 2025 +0100
+
+    pre train autoencoder for ts data
+
+[33mcommit d81c20ec70fa6356c87ae8633abd2d9c159a6417[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Fri Mar 7 15:37:32 2025 +0100
+
+    plot loss of pre train autoencoder
+
+[33mcommit f57bdf824f7998031ffb77f7096af12db5c04d21[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Fri Mar 7 15:37:04 2025 +0100
+
+    plot loss of pre train autoencoder
+
+[33mcommit f10175f70d0b50fae91ce6848f0c6311e3fb1e2b[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Fri Mar 7 14:54:31 2025 +0100
+
+    pre train autoencoder and find the best params
+
+[33mcommit b42a3d698955fb6fb0adb326ead2307b3d99a88c[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Wed Mar 5 01:11:59 2025 +0100
+
+    pre train autoencoder for ts data
+
+[33mcommit 5bd3f1d5d2f9ae8e1d4fe8f323bd02345c70f88d[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Sun Mar 2 16:53:03 2025 +0100
+
+    organize the ts data into each patient mode
+
+[33mcommit f6c8641ba3dec3e1ddc7d7a3aed73c9ea0f71203[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Sun Mar 2 16:46:20 2025 +0100
+
+    genrate the final input (ts,flat,diagnosis,drug,riskscore) for model
+
+[33mcommit af57de4cbb0e33b6f4c169b248946f4bdb537c52[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Sun Mar 2 15:47:08 2025 +0100
+
+    genrate the final input (ts,flat,diagnosis,drug,riskscore) for model
+
+[33mcommit 345948d377459d5c4089908ecac36fa3e9cc979b[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Fri Feb 28 23:11:33 2025 +0100
+
+    add gender and age to labels
+
+[33mcommit 3c30bb37dae593b7e7ee645ae53511bab25e5f48[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Fri Feb 28 22:04:09 2025 +0100
+
+    flat data
+
+[33mcommit e068da0d95e279327f62188edf231c8de1f731d3[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Fri Feb 28 21:50:52 2025 +0100
+
+    time series data with normalization, interpolation,ffill and bfill adn smooth
+
+[33mcommit 4aaafa5e8d37a27897065e67b334fdae7dbcc584[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Fri Feb 28 09:34:33 2025 +0100
+
+    time series data with marker (Nan or Not Nan)
+
+[33mcommit ca5ac5722eaf2c49316f45588631d11dfdd20264[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Fri Feb 28 01:19:03 2025 +0100
+
+    time series data with marker (Nan or Not Nan)
+
+[33mcommit b5211127a706f00c012850cb60b7700e7b50ad28[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Thu Feb 27 22:00:18 2025 +0100
+
+    time series data with marker (Nan or Not Nan)
+
+[33mcommit b106bb7af7ecdf47c56c379ee23e3e37122b13c1[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Thu Feb 27 21:46:56 2025 +0100
+
+    time series data with marker (Nan or Not Nan)
+
+[33mcommit aa3e41193c5dc86c76032e2867ed6be4fe579cb4[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Thu Feb 27 15:35:56 2025 +0100
+
+    analysis feature importance via integrated gradients
+
+[33mcommit f45a7afb81284418242d2cf5adaf00b4ceca7843[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Wed Feb 26 19:13:32 2025 +0100
+
+    compare the model  with no graph
+
+[33mcommit e69558c19a650606c06aedd1847bc35499474938[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Wed Feb 26 17:56:48 2025 +0100
+
+    compare the model  with no graph
+
+[33mcommit cc4db09f851eeff49aded1536c1126dd0a4b743c[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Thu Feb 20 14:59:52 2025 +0100
+
+    train, val and test model
+
+[33mcommit 249c805fb66f58a732b3b90d11545caede9ccaff[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Tue Feb 18 18:10:34 2025 +0100
+
+    get embedding of patient over  time --test set
+
+[33mcommit 1dc251b014d066ca17e9565ec743c7b2aed35758[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Mon Feb 17 21:11:54 2025 +0100
+
+    get embedding of patient over time
+
+[33mcommit 07062e931f6e7c6f561f79dbbc817ab0ec90cd8b[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Thu Feb 13 18:44:52 2025 +0100
+
+    train  lstm gnn model
+
+[33mcommit 7658a037729fe1d3ee9d421ffd59854aa2f1b0b6[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Sun Feb 9 11:34:03 2025 +0100
+
+    graph dataloader
+
+[33mcommit dceb71196e88e5c7861c02139ba4692cc67aa5fa[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Sat Feb 8 16:11:57 2025 +0100
+
+    Dataset for flat, timseries and risk scores
+
+[33mcommit b215efc0500be9efe312826b63baf8182cd6ad11[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Sat Feb 8 16:11:20 2025 +0100
+
+    Dataset for flat, timseries and risk scores
+
+[33mcommit 14e0c97b02a9cf9ef01d0552e36eb1651f784f64[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Sat Feb 8 16:01:03 2025 +0100
+
+    save risk score for each paient in h5py version
+
+[33mcommit ccd11c5ec9c7ff88f0651d786edf400352aa2a63[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Sat Feb 8 14:03:25 2025 +0100
+
+    save timeseries data for each paient in h5py version
+
+[33mcommit 2c47e987b9c3a664e269c4f93f14760a0f714b79[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Sat Feb 8 13:14:47 2025 +0100
+
+    save timeseries data for each paient in h5py version
+
+[33mcommit ae709b6e3b402603675373e97e80027bff023e8a[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Thu Feb 6 23:58:42 2025 +0100
+
+    save timeseries data for each paient
+
+[33mcommit 9d4e3df5bb0d94e6d780d3130b8c26762cb979f5[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Wed Feb 5 23:37:53 2025 +0100
+
+    add risk score as ground truth
+
+[33mcommit 86427586e1acdbf8c5bdacc3d303b3c616b467bc[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Tue Feb 4 17:38:49 2025 +0100
+
+    risk score
+
+[33mcommit 1588dc899fa7b205bcf58b551f37d6c330c9b507[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Tue Feb 4 17:25:42 2025 +0100
+
+    model test
+
+[33mcommit 21f9b13a4bb2e7a6d5dc0d20dc08f5f53e4a836b[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Wed Jan 29 21:49:07 2025 +0100
+
+    ts and pyg reader
+
+[33mcommit a1a0f41828b5007d60bf40a4a0e9a20c46270425[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Sun Jan 26 23:02:18 2025 +0100
+
+    lstm dataloader
+
+[33mcommit ffd840d56b777465418abe757003f6507e7adaab[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Thu Jan 23 16:20:05 2025 +0100
+
+    create graph
+
+[33mcommit 0d81433b0ff23a340d2df148e2582badc8007b96[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Thu Jan 23 16:04:17 2025 +0100
+
+    split train/val/test
+
+[33mcommit 0d3004c5d9926e76a3ff2efde8b73c1857d39f82[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Thu Jan 23 15:47:29 2025 +0100
+
+    process all tables finally
+
+[33mcommit a955c9b7e414593981ba377506d27b949a89a717[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Thu Jan 23 12:20:13 2025 +0100
+
+    process time series data
+
+[33mcommit 3c71b9e7a1b3fd138949b6a4116fc14073ed583d[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Thu Jan 23 12:19:54 2025 +0100
+
+    process time series data
+
+[33mcommit 162f11e9294b668146da210dea39290ed6434ede[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Tue Jan 21 22:12:57 2025 +0100
+
+    time data
+
+[33mcommit 372ffa7798efdb1bae0566f71dfbaeb1592f4b14[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Tue Jan 21 14:33:48 2025 +0100
+
+    process flat and drug  tables
+
+[33mcommit 1f2db430a14f3ffdb232af86a9b5ba2cb329eb5f[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Tue Jan 21 14:30:57 2025 +0100
+
+    process flat and labels tables
+
+[33mcommit 09d4c75607c7a4ca9841b8fc973c14283490c6fd[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Tue Jan 21 11:47:56 2025 +0100
+
+    create tables
+
+[33mcommit 328be1c056052322ade9dd54b9f4a5c9211c155c[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Sun Jan 19 21:55:30 2025 +0100
+
+    pyg reader
+
+[33mcommit ed85b24659779be0b6d44ca63cc5bf22350c7506[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Sun Jan 19 14:13:09 2025 +0100
+
+    convert csv to mmap
+
+[33mcommit 065294a0c684ae514ebd959c48ccf78bc1a2a9ed[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Sun Jan 19 11:02:33 2025 +0100
+
+    create graph
+
+[33mcommit a2f15a6b951b12c371b0758040fa8bbe9be6b967[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Sun Jan 19 10:47:32 2025 +0100
+
+    split train/val/test
+
+[33mcommit 95695e9f172a1a8caa2a2f43ade6e62e89901a13[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Sun Jan 19 10:31:14 2025 +0100
+
+    get final tables
+
+[33mcommit 9c47bde816ce10753453ed1c0d9173f846237067[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Sat Jan 18 18:39:25 2025 +0100
+
+    process timeseries table
+
+[33mcommit 5e31039b2507d3dd1e516db627923ae288b1b153[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Sat Jan 18 18:38:26 2025 +0100
+
+    process timeseries table
+
+[33mcommit ddfc047c8c12b039753990f8b523b879af716be6[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Sat Jan 18 15:06:08 2025 +0100
+
+    process timeseries table
+
+[33mcommit 9a8062782858a17eedf64e1345b7960b4e4713fe[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Sat Jan 18 12:00:57 2025 +0100
+
+    process drug  tables
+
+[33mcommit 783916543a4e5f2750d3c777a5bc7c5967b4800c[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Sat Jan 18 11:58:21 2025 +0100
+
+    process flat and label tables
+
+[33mcommit 5cb4c8f57beabd284667dae3b25f20f776646e69[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Sat Jan 18 11:47:52 2025 +0100
+
+    process diagnosis table
+
+[33mcommit 5044452fa92379dc89702a43b382db19f6bf26c3[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Sat Jan 18 11:45:32 2025 +0100
+
+    create tables
+
+[33mcommit c0e8127bd84d2e06bdf09c4ec959f8edb15cec76[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Thu Jan 16 13:54:09 2025 +0100
+
+    convert csv to mmap
+
+[33mcommit 805fc0249357a65919fc5090d005730e917dc4b2[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Thu Jan 16 13:21:49 2025 +0100
+
+    convert csv to mmap
+
+[33mcommit 04295a7463a97b1083b5c0bde7127b611248bb51[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Thu Jan 16 12:43:39 2025 +0100
+
+    name unname col in timeseries as time
+
+[33mcommit bcd198912f6f8a35cab154610cf0fc4d33e9b8c9[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Thu Jan 16 12:43:10 2025 +0100
+
+    name unname col in timeseries as time
+
+[33mcommit 85a16d4a1642d4b25d9bc9dd39a5725cdc742d73[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Thu Jan 16 12:31:51 2025 +0100
+
+    further process timeseries data- calculate low maks ratio
+
+[33mcommit 7c1d188b134721d8147eab4c9169799aee210685[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Thu Jan 16 10:35:43 2025 +0100
+
+    generte graph for diagnosis
+
+[33mcommit 84f2bb0ba3bd58b2e4e6010d499b4e16ef19536e[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Thu Jan 16 09:50:53 2025 +0100
+
+    split train, val, test
+
+[33mcommit 75364e48b10edf44a6d00571803b01d9a1bcd724[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Wed Jan 15 23:15:09 2025 +0100
+
+    proess the fianl dataset that used to model
+
+[33mcommit ca607f17996b80522542377435bd8734845f0725[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Wed Jan 15 23:14:45 2025 +0100
+
+    proess the fianl dataset that used to model
+
+[33mcommit f66b810da2e914f9a8dd1bce2c537160475e0b02[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Wed Jan 15 22:50:44 2025 +0100
+
+    process timeseries data
+
+[33mcommit ddde21beaeab086a070967b9066fcc60909f2b78[m
+Author: joy628 <joy_sun628@outlook.com>
+Date:   Wed Jan 15 22:47:46 2025 +0100
+
+    process timeseries data- lab and vital periodic table
+
+[33mcommit abe1477aeefa2c54b629e1b368842056fb8855ec[m
+Author: joy628 <Joy_Sun628@outlook.com>
+Date:   Wed Jan 15 21:24:40 2025 +0100
+
+    process admission drug  table
+
+[33mcommit 20f67a754206824219cd27fd734a04d9878604df[m
+Author: joy628 <Joy_Sun628@outlook.com>
+Date:   Wed Jan 15 20:58:06 2025 +0100
+
+    process diagnosis table
+
+[33mcommit 1fa22fa0f5d626c29c0130c69a3e4cad2245ac5f[m
+Author: joy628 <Joy_Sun628@outlook.com>
+Date:   Wed Jan 15 20:55:57 2025 +0100
+
+    process flat and lables table
+
+[33mcommit ae9c208ed67794a27d8e11f76957701f24938bbb[m
+Author: joy628 <Joy_Sun628@outlook.com>
+Date:   Wed Jan 15 20:51:36 2025 +0100
+
+    creat all tables
+
+[33mcommit 96b7ccf630bd7e504dc820346ac71d4e3661bc35[m
+Author: joy628 <Joy_Sun628@outlook.com>
+Date:   Tue Jan 14 22:31:50 2025 +0100
+
+    process flat and lables table
+
+[33mcommit e1ce9a39823fd8edf92b16dfe5c1255bd9e3c14d[m
+Author: joy628 <Joy_Sun628@outlook.com>
+Date:   Tue Jan 14 22:11:21 2025 +0100
+
+    process diagnosis table (pathhistroy+apacheadmissiondx)
+
+[33mcommit b8a002cc783cc9bcf282e1ff22554a57dadf8c87[m
+Author: joy628 <Joy_Sun628@outlook.com>
+Date:   Tue Jan 14 21:40:05 2025 +0100
+
+    step1 process all tables
+
+[33mcommit 6bb27ed77995f5bd65ede4eeea0ab6077a238243[m
+Author: joy628 <Joy_Sun628@outlook.com>
+Date:   Tue Jan 14 17:49:54 2025 +0100
+
+    first step to process the tables
+
+[33mcommit c361d0d3af19a69ba55d2c34b643ab54acbdac52[m
+Author: joy628 <Joy_Sun628@outlook.com>
+Date:   Tue Jan 14 17:49:01 2025 +0100
+
+    first step to process the tables
+
+[33mcommit b4c48c85a3af1eb1989312fe9eadaca98c19e520[m
+Author: joy628 <Joy_Sun628@outlook.com>
+Date:   Tue Jan 14 17:48:18 2025 +0100
+
+    Update .gitignore to ignore data folder contents
+
+[33mcommit 31df1741e88ee7ff0628a122f711025b9566ee4b[m
+Author: joy628 <Joy_Sun628@outlook.com>
+Date:   Tue Jan 14 16:08:55 2025 +0100
+
+    processing the eicu data
+
+[33mcommit 3e4d3b9d71f99441f7d5d98bed627165a2c0b586[m
+Author: joy628 <Joy_Sun628@outlook.com>
+Date:   Tue Jan 14 16:02:21 2025 +0100
+
+    store the eicu data
+
+[33mcommit 2655bf572cb3bb3de44187c9c8ddcffa94d218d1[m[33m ([m[1;31morigin/joy[m[33m)[m
+Author: joy628 <Joy_Sun628@outlook.com>
+Date:   Tue Jan 14 15:02:12 2025 +0100
+
+    first commit

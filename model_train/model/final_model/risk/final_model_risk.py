@@ -44,7 +44,7 @@ class TimeSeriesEncoder(nn.Module):
     def forward(self, x_input_seq,y,length=None): # x_input_seq: (B, T_max, D_original_features)
                        
         # 1. Get latent distribution from pretrained VAE Encoder
-        z_dist_flat,_ = self.pretrained_encoder(x_input_seq,y,length) 
+        z_dist_flat = self.pretrained_encoder(x_input_seq,y,length) 
         
         # 2. Get point estimate (mean) for the latent representation
         z_e_sample_flat = z_dist_flat.mean 
@@ -165,7 +165,7 @@ class PatientOutcomeModel(nn.Module):
         self.risk_predictor = RiskPredictor(hidden_dim, hidden_dim)     
             
 
-    def forward(self, flat_data, graph_data, ts_data,cat,length=None):
+    def forward(self, flat_data, graph_data, ts_data,length=None):
         device = ts_data.device
    
         # === Graph Embedding  ===
@@ -184,7 +184,7 @@ class PatientOutcomeModel(nn.Module):
         fused_static = self.fusion([flat_emb, graph_emb])  # [B, D]
 
         # === TS Embedding ===
-        ts_emb= self.ts_encoder(ts_data,cat,length)  # [B, T, D]        
+        ts_emb= self.ts_encoder(ts_data,length)  # [B, T, D]        
                 
         # === Risk Prediction ===  
         risk_scores = self.risk_predictor(fused_static, ts_emb,length)  # [B, T]

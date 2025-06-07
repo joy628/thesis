@@ -8,20 +8,49 @@ import sys
 sys.path.append('/home/mei/nas/docker/thesis/model_train/model')
 from  retnet.retnetModule.retnet import RetNet
 
-class RetNetEncoder(nn.Module):
-    def __init__(self, input_dim, latent_dim, hidden_dim=256, layers=1, ffn_size=256, heads=2):
+
+
+class ConditionalPrior(nn.Module):
+    def __init__(self, y_dim, latent_dim):
         super().__init__()
-        self.input_proj = nn.Linear(input_dim, hidden_dim)
+        self.fc = nn.Sequential(
+            nn.Linear(y_dim, 128),
+            nn.ReLU(),
+            nn.Linear(128, latent_dim * 2)
+        )
+        self.latent_dim = latent_dim
+
+    def forward(self,x,y):
+        y_onehot = F.one_hot(y, num_classes=4).float()  # (B, 4)
+        h = self.fc(y_onehot)  # (B, 2*latent_dim)
+        mu, logvar = torch.chunk(h, 2, dim=-1)
+        std = F.softplus(0.5 * logvar) + 1e-3
+        
+        _,T,_ = x.shape
+        mu = mu.unsqueeze(1).expand(-1, T, -1)  # (B, T, latent_dim)
+        std = std.unsqueeze(1).expand(-1, T, -1)  # (B, T, latent_dim)
+        
+        return Independent(Normal(loc=mu, scale=std), 1)  # (B, T ,latent_dim)
+    
+
+class RetNetEncoder(nn.Module):
+    def __init__(self, input_dim, latent_dim, y_dim=4, hidden_dim=256, layers=1, ffn_size=256, heads=2):
+        super().__init__()
+        self.input_proj = nn.Linear(input_dim + y_dim, hidden_dim)
         self.retnet = RetNet(layers=layers, hidden_dim=hidden_dim, ffn_size=ffn_size, heads=heads)
         self.norm = nn.LayerNorm(hidden_dim)
         self.mu_proj = nn.Linear(hidden_dim, latent_dim)
         self.logvar_proj = nn.Linear(hidden_dim, latent_dim)
+        self.prior_net = ConditionalPrior(y_dim=4, latent_dim=latent_dim)
 
-    def forward(self, x,lengths=None):
+
+    def forward(self, x, y,lengths=None):
         # x: (B, T, input_dim)
-
+        y_onehot = F.one_hot(y, num_classes=4).float()
+        y_expand = y_onehot.unsqueeze(1).expand(-1, x.size(1), -1)  # (B, T, 4)
+        x_cond = torch.cat([x, y_expand], dim=-1)               # (B, T, D+4)
         
-        x_proj = self.input_proj(x)  # → (B, T, hidden_dim)
+        x_proj = self.input_proj(x_cond)  # → (B, T, hidden_dim)
         h = self.retnet(x_proj)      # → (B, T, hidden_dim)
         h= self.norm(h)
         mu = self.mu_proj(h)         # → (B, T, latent_dim)
@@ -30,22 +59,29 @@ class RetNetEncoder(nn.Module):
         
         # D维 每个维度构造一个独立的一维正态分布 shape (B, T, latent_dim)
         distr = Independent(Normal(loc=mu, scale=std), 1)
-        return  distr  
+        
+        ## learnbale prior
+        prior_dist = self.prior_net(x,y)  # shape (B, latent_dim)
+ 
+        return  distr , prior_dist # Return both q(z|x) and prior p(z|y)
     
     
 class RetNetDecoder(nn.Module):
-    def __init__(self, latent_dim, output_dim,hidden_dim=256, layers=2, ffn_size=256, heads=2):
+    def __init__(self, latent_dim, output_dim, y_dim=4,hidden_dim=256, layers=2, ffn_size=256, heads=2):
         super().__init__()
-        self.input_proj = nn.Linear(latent_dim , hidden_dim)
+        self.input_proj = nn.Linear(latent_dim + y_dim, hidden_dim)
         self.retnet = RetNet(layers=layers, hidden_dim=hidden_dim, ffn_size=ffn_size, heads=heads)
         self.out_mu = nn.Linear(hidden_dim, output_dim)
         self.out_logvar = nn.Linear(hidden_dim, output_dim)
 
-    def forward(self, z):
+    def forward(self, z,y):
         # z: (B, T, latent_dim)
         
+        y_onehot = F.one_hot(y, num_classes=4).float()            # (B, 4)
+        y_expand = y_onehot.unsqueeze(1).expand(-1, z.size(1), -1)  # (B, T, 4)
+        z_cond = torch.cat([z, y_expand], dim=-1)                 # (B, T, latent+4)
 
-        z_proj = self.input_proj(z)          # (B, T, hidden_dim)
+        z_proj = self.input_proj(z_cond)          # (B, T, hidden_dim)
         h = self.retnet(z_proj)              # (B, T, hidden_dim)
         mu = self.out_mu(h)                  # (B, T, output_dim)
 
@@ -130,38 +166,38 @@ class SOMLayer(nn.Module):
         q = q + torch.finfo(q.dtype).eps #
         return q
     
-# class LSTMPredictor(nn.Module):
-#     def __init__(self, latent_dim, lstm_h_dim):
-#         super().__init__()
-#         self.lstm_h_dim = lstm_h_dim
-#         self.latent_dim = latent_dim
-#         self.lstm = nn.LSTM(latent_dim, lstm_h_dim, batch_first=True) 
-#         self.fc1 = nn.Linear(lstm_h_dim, lstm_h_dim)
+class LSTMPredictor(nn.Module):
+    def __init__(self, latent_dim, lstm_h_dim):
+        super().__init__()
+        self.lstm_h_dim = lstm_h_dim
+        self.latent_dim = latent_dim
+        self.lstm = nn.LSTM(latent_dim, lstm_h_dim, batch_first=True) 
+        self.fc1 = nn.Linear(lstm_h_dim, lstm_h_dim)
         
-#         self.fc_out_mu = nn.Linear(lstm_h_dim, latent_dim)
-#         self.fc_out_logvar = nn.Linear(lstm_h_dim, latent_dim)
+        self.fc_out_mu = nn.Linear(lstm_h_dim, latent_dim)
+        self.fc_out_logvar = nn.Linear(lstm_h_dim, latent_dim)
 
-#     def forward(self, z_e_sequence,lengths, h_c_init=None):
+    def forward(self, z_e_sequence,lengths, h_c_init=None):
         
-#         packed_input = pack_padded_sequence(z_e_sequence, lengths.cpu(), batch_first=True, enforce_sorted=False)
-#         packed_output, (h_n, c_n) = self.lstm(packed_input, h_c_init)
-#         lstm_out, _ = pad_packed_sequence(packed_output, batch_first=True, total_length=z_e_sequence.size(1))
+        packed_input = pack_padded_sequence(z_e_sequence, lengths.cpu(), batch_first=True, enforce_sorted=False)
+        packed_output, (h_n, c_n) = self.lstm(packed_input, h_c_init)
+        lstm_out, _ = pad_packed_sequence(packed_output, batch_first=True, total_length=z_e_sequence.size(1))
         
-#         # Reshape lstm_out to (B*T, D_lstm_h) to 
-#         B, T, _ = lstm_out.shape
-#         lstm_out_flat = lstm_out.reshape(B * T, self.lstm_h_dim)
+        # Reshape lstm_out to (B*T, D_lstm_h) to 
+        B, T, _ = lstm_out.shape
+        lstm_out_flat = lstm_out.reshape(B * T, self.lstm_h_dim)
         
-#         h = F.leaky_relu(self.fc1(lstm_out_flat))
+        h = F.leaky_relu(self.fc1(lstm_out_flat))
         
-#         pred_mu = self.fc_out_mu(h)
-#         pred_logvar = self.fc_out_logvar(h)
+        pred_mu = self.fc_out_mu(h)
+        pred_logvar = self.fc_out_logvar(h)
         
-#         std = torch.exp(0.5 * pred_logvar)
-#         base_dist = Normal(pred_mu, std)
-#         pred_dist = Independent(base_dist, 1) # Makes latent_dim an event_dim
+        std = torch.exp(0.5 * pred_logvar)
+        base_dist = Normal(pred_mu, std)
+        pred_dist = Independent(base_dist, 1) # Makes latent_dim an event_dim
         
 
-#         return pred_dist, (h_n, c_n)
+        return pred_dist, (h_n, c_n)
     
     
     
@@ -179,15 +215,15 @@ class TSAutoencoder(nn.Module):
         self.encoder = RetNetEncoder(input_channels, latent_dim)
         self.decoder = RetNetDecoder(latent_dim, input_channels)
         self.som_layer = SOMLayer(som_dim, latent_dim)
-        # self.predictor = LSTMPredictor(latent_dim, lstm_dim)
+        self.predictor = LSTMPredictor(latent_dim, lstm_dim)
 
-    def forward(self, x_input_seq, lengths=None, is_training=True):
+    def forward(self, x_input_seq, y, lengths=None, is_training=True, lstm_init_state=None):
         
         # x_input_seq: (B, T_max, D_features)
         B, T_max, _ = x_input_seq.shape
         
         # 2. get latent distribution q(z|x) from encoder
-        z_dist_seq = self.encoder(x_input_seq,lengths) # [b, T_max, D_latent] 
+        z_dist_seq, prior_distr = self.encoder(x_input_seq,y,lengths) # [b, T_max, D_latent] 
         
         # 3. Sample z_e from the distribution
         if is_training:
@@ -197,7 +233,7 @@ class TSAutoencoder(nn.Module):
         
                     
         # 4. VAE Decoder -> Get reconstruction distribution p(x_hat|z_e)
-        recon_dist_seq = self.decoder( z_e_sample_seq) # IndependentNormal, event_shape=[input_channels], batch_shape=[B,T]
+        recon_dist_seq = self.decoder( z_e_sample_seq,y) # IndependentNormal, event_shape=[input_channels], batch_shape=[B,T]
 
         # 5. SOM computations (on z_e_sample_flat)
         #   Distances from z_e_sample_flat to SOM embeddings
@@ -221,16 +257,17 @@ class TSAutoencoder(nn.Module):
         
         bmu_indices_flat_for_smooth = bmu_indices_flat
         
-        # # 6. LSTM Prediction (on z_e_sample_seq ,shape (B, T_max, D_latent))
-        # prediction_distribution_from_lstm, (h_n, c_n) = self.predictor(
-        #     z_e_sample_seq.detach(),  # 输入给LSTM的z应不带梯度回传到encoder
-        #     lengths,
-        #     h_c_init=lstm_init_state
-        # )
+        # 6. LSTM Prediction (on z_e_sample_seq ,shape (B, T_max, D_latent))
+        prediction_distribution_from_lstm, (h_n, c_n) = self.predictor(
+            z_e_sample_seq.detach(),  # 输入给LSTM的z应不带梯度回传到encoder
+            lengths,
+            h_c_init=lstm_init_state
+        )
 
         # Prepare outputs
         outputs = {
             "z_dist_seq": z_dist_seq,               # q(z|x) for each timestep，[B, T_max, D_latent]
+            "prior_dist_seq": prior_distr,             # p(z|y) prior distribution
             "z_e_sample_flat": z_e_sample_flat,         # Sampled z for each timestep
             "z_e_sample_seq": z_e_sample_seq,           # Sampled z, reshaped to (B, T, D)
             "recon_dist_seq": recon_dist_seq,         # p(x_hat|z) for each timestep
@@ -239,10 +276,10 @@ class TSAutoencoder(nn.Module):
             "z_q_neighbors_stacked_flat": z_q_neighbors_stacked_flat, # For SOM pretrain loss
             "q_soft_flat": q_soft_flat,                 # Soft assignment q for each z_e_sample_flat
             "q_soft_flat_ng": q_soft_flat_ng, 
-            "bmu_indices_flat_for_smooth": bmu_indices_flat_for_smooth
+            "bmu_indices_flat_for_smooth": bmu_indices_flat_for_smooth,
             
-            # "pred_z_dist_flat": prediction_distribution_from_lstm,   # LSTM's prediction dist for next z
-            # "lstm_final_state": (h_n, c_n)
+            "pred_z_dist_flat": prediction_distribution_from_lstm,   # LSTM's prediction dist for next z
+            "lstm_final_state": (h_n, c_n)
         }
         return outputs
         
@@ -277,17 +314,19 @@ class TSAutoencoder(nn.Module):
     
 
     
-    def compute_loss_reconstruction_ze(self, x_input_seq_true, recon_dist_seq, z_dist_seq, prior_beta_vae, mask_seq):
+    def compute_loss_reconstruction_ze(self, x_input_seq_true, recon_dist_seq, z_dist_seq, prior_distr_seq, prior_beta_vae, mask_seq):
         """
         x_input_seq_true: (B, T_max, D_features)
         recon_dist_seq: IndependentNormal for p(x_hat_t|z_t), batch_shape=(B, T_max), event_shape=(D_input,)
         z_dist_seq: IndependentNormal for q(z_t|x_t), batch_shape=(B, T_max), event_shape=(D_latent,)
-        prior_beta_vae: scalar, weight forKL term
+        prior_beta_vae: scalar, weight for KL term
         mask_seq: (B, T_max), boolean or float
+        prior_distr_seq: IndependentNormal for p(z|y), batch_shape=(B,T)event_shape=(D_latent,)
         """
         # Reconstruction Loss (log likelihood) 
         
         # 1）log‐likelihood per‐timestep → (B,T)    
+        # D = x_input_seq_true.size(-1)
         log_p = recon_dist_seq.log_prob(x_input_seq_true)
         mask_f = mask_seq.float()
         
@@ -298,12 +337,7 @@ class TSAutoencoder(nn.Module):
         recon_loss = - per_seq_lp.mean()
         
         # KL Divergence
-        # Create prior: N(0,I) for each z_t. batch_shape=(B, T_max), event_shape=(D_latent,)
-
-        # kl_divergence(z_dist_seq, prior_dist) will have shape (B, T_max)
-        prior = Independent(Normal(torch.zeros_like(z_dist_seq.mean),
-                                torch.ones_like(z_dist_seq.stddev)), 1)
-        kl_t = kl_divergence(z_dist_seq, prior)        # (B,T)
+        kl_t = kl_divergence(z_dist_seq, prior_distr_seq)        # (B,T)
         per_seq_kl = (kl_t * mask_f).sum(dim=1) / mask_f.sum(dim=1).clamp(min=1)
         kl_loss = per_seq_kl.mean()
         
@@ -442,3 +476,6 @@ class TSAutoencoder(nn.Module):
         z_e_expanded = z_e_detached.unsqueeze(1).expand_as(z_q_neighbors_stacked_flat)
         
         return F.mse_loss(z_e_expanded, z_q_neighbors_stacked_flat)
+
+
+

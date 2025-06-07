@@ -11,11 +11,7 @@ import math
 from tqdm import tqdm
 import torch
 torch.autograd.set_detect_anomaly(True)
-from sklearn.manifold import TSNE
-import umap
-import seaborn as sns
-import pandas as pd
-from torch import amp
+
 
 
 def freeze_all(model):
@@ -83,7 +79,9 @@ def train_vae(model, train_loader, device, optimizer, start,epochs, save_dir, pa
         if ep < kl_warmup_epochs:
             kl_weight = beta_value_for_kl * (ep / kl_warmup_epochs)
         else:
-            kl_weight = beta_value_for_kl             
+            kl_weight = beta_value_for_kl
+            
+              
            
         total_epoch_loss = 0.0
         total_epoch_recon_loss = 0.0
@@ -93,10 +91,11 @@ def train_vae(model, train_loader, device, optimizer, start,epochs, save_dir, pa
             
             optimizer.zero_grad()
             x_seq, lengths = x_seq.to(device), lengths.to(device)
+            cat = cat.to(device)
             B, T_max, D_input = x_seq.shape
             mask_seq, mask_flat_bool = model.generate_mask(T_max, lengths) # (B, T_max) and (B*T_max)
             
-            outputs = model(x_seq,lengths, is_training=True) # is_training affects BN/Dropout in VAE
+            outputs = model(x_seq, cat,lengths, is_training=True) # is_training affects BN/Dropout in VAE
             
             check_nan_in_dist(outputs["recon_dist_seq"], "recon_dist")
             check_nan_in_dist(outputs["z_dist_seq"], "z_dist")
@@ -105,6 +104,7 @@ def train_vae(model, train_loader, device, optimizer, start,epochs, save_dir, pa
                 x_seq,       
                 outputs["recon_dist_seq"],   
                 outputs["z_dist_seq"], # [B,T_max, D]  
+                outputs["prior_dist_seq"], # [B,T_max, D]
                 kl_weight, # Annealed KL weight for VAE loss
                 mask_seq                     
             )
@@ -170,8 +170,10 @@ def train_som(  model,  train_loader,  device,  max_epochs: int, save_dir: str,p
     freeze_all(model)
     model.som_layer.embeddings.requires_grad = True
 
+
     model.encoder.eval()
     model.decoder.eval()
+    model.predictor.eval()
 
     best_loss = float("inf")
     best_wts  = copy.deepcopy(model.state_dict())
@@ -180,7 +182,7 @@ def train_som(  model,  train_loader,  device,  max_epochs: int, save_dir: str,p
 
     # devide into 3 segments
     seg = max_epochs // 3
-    lrs = [0.01, 0.001, 0.0001]
+    lrs = [0.01, 0.01, 0.001]
     
     global_step_som_pre = 0
     epoch_idx = 0
@@ -195,12 +197,13 @@ def train_som(  model,  train_loader,  device,  max_epochs: int, save_dir: str,p
             total_epoch_loss = 0.0
             for x_seq, lengths, _ ,cat in train_loader:
                 x_seq, lengths = x_seq.to(device), lengths.to(device)
+                cat = cat.to(device)
                 B, T_max, D_input = x_seq.shape
                 
                 optimizer.zero_grad()
                 
                 with torch.no_grad(): # Get z_e from frozen VAE encoder
-                    outputs_vae = model(x_seq,lengths, is_training=False) #
+                    outputs_vae = model(x_seq, cat,lengths, is_training=False) #
                     z_e_sample = outputs_vae["z_e_sample_seq"]  # shape: [B, T, D]
                     _, mask_flat_bool = model.generate_mask(T_max, lengths)  # [B, T] and [B*T]
                     z_e_sample_flat = z_e_sample.reshape(B * T_max, -1)  # [B*T, D]
@@ -292,7 +295,8 @@ def train_joint(model, train_loader, val_loader, train_loader_for_p, device, opt
         with torch.no_grad():
             for x_p_batch, lengths_p_batch, _, cat in tqdm(train_loader_for_p, desc=f"[Joint E{ep+1}] Calc Global P", leave=False):
                 x_p_batch, lengths_p_batch = x_p_batch.to(device), lengths_p_batch.to(device)
-                outputs_p_calc = model(x_p_batch, lengths_p_batch, is_training=False)
+                cat = cat.to(device)
+                outputs_p_calc = model(x_p_batch, cat,lengths_p_batch, is_training=False)
                 
                 _, mask_p_flat_bool = model.generate_mask(x_p_batch.size(1), lengths_p_batch)
                 
@@ -313,10 +317,12 @@ def train_joint(model, train_loader, val_loader, train_loader_for_p, device, opt
         for x_seq, lengths, original_indices_batch, cat in train_loader:
             x_seq, lengths = x_seq.to(device), lengths.to(device)
             original_indices_batch = original_indices_batch.to(device)
+            cat = cat.to(device) 
             B_actual, T_actual_max, D_input = x_seq.shape
             mask_seq, mask_flat_bool = model.generate_mask(T_actual_max, lengths)
 
             p_batch_target_list = []
+            # if p_target_train_global_flat_current_epoch is not None:
             for i in range(B_actual):
                 orig_idx = original_indices_batch[i].item()
                 len_actual = lengths[i].item()
@@ -327,9 +333,12 @@ def train_joint(model, train_loader, val_loader, train_loader_for_p, device, opt
                 p_patient_valid = p_target_train_global_flat_current_epoch[start_idx:end_idx]
                 p_batch_target_list.append(p_patient_valid)
             p_batch_target_valid_timesteps = torch.cat(p_batch_target_list, dim=0)
+            # else:
+            #     num_valid_steps = mask_flat_bool.sum().item()
+            #     p_batch_target_valid_timesteps = torch.ones(num_valid_steps, model.som_layer.n_nodes, device=device) / model.som_layer.n_nodes
 
             optimizer.zero_grad()
-            outputs = model(x_seq, lengths, is_training=True)
+            outputs = model(x_seq,cat, lengths, is_training=True)
             
             q_soft_flat_valid = outputs["q_soft_flat"][mask_flat_bool]
             q_soft_flat_ng_valid = outputs["q_soft_flat_ng"][mask_flat_bool]
@@ -344,7 +353,7 @@ def train_joint(model, train_loader, val_loader, train_loader_for_p, device, opt
             
             
             loss_elbo, recon_l, kl_l = model.compute_loss_reconstruction_ze(
-                x_seq, outputs["recon_dist_seq"], outputs["z_dist_seq"],kl_weight, mask_seq
+                x_seq, outputs["recon_dist_seq"], outputs["z_dist_seq"],outputs["prior_dist_seq"], kl_weight, mask_seq
             )
             loss_cah = model.compute_loss_commit_cah(p_batch_target_valid_timesteps, q_soft_flat_valid)
             
@@ -356,15 +365,11 @@ def train_joint(model, train_loader, val_loader, train_loader_for_p, device, opt
             loss_smooth = model.compute_loss_smoothness(
               z_e_sample_seq, bmu_indices_flat, model.alpha_som_q, mask_seq
         )
-            # pred_z_dist_flat = outputs["pred_z_dist_flat"] 
+            pred_z_dist_flat = outputs["pred_z_dist_flat"] 
             
-            # loss_pred = model.compute_loss_prediction(pred_z_dist_flat, outputs["z_e_sample_seq"], mask_flat_bool)
+            loss_pred = model.compute_loss_prediction(pred_z_dist_flat, outputs["z_e_sample_seq"], mask_flat_bool)
 
-            # total_loss = theta * loss_elbo + gamma * loss_cah + beta * loss_s_som + kappa * loss_smooth + eta * loss_pred
-            
-            total_loss = theta * loss_elbo + gamma * loss_cah + beta * loss_s_som + kappa * loss_smooth 
-            
-            
+            total_loss = theta * loss_elbo + gamma * loss_cah + beta * loss_s_som + kappa * loss_smooth + eta * loss_pred
             total_loss.backward()
             optimizer.step()
 
@@ -375,6 +380,7 @@ def train_joint(model, train_loader, val_loader, train_loader_for_p, device, opt
             current_epoch_losses['train_cah'] += loss_cah.item()
             current_epoch_losses['train_s_som'] += loss_s_som.item()
             current_epoch_losses['train_smooth'] += loss_smooth.item()
+            current_epoch_losses['train_pred'] += loss_pred.item()
 
         for key in current_epoch_losses:
             history[key].append(current_epoch_losses[key] / len(train_loader))
@@ -384,20 +390,22 @@ def train_joint(model, train_loader, val_loader, train_loader_for_p, device, opt
         with torch.no_grad():
             for x_seq_val, lengths_val, _, cat_val in val_loader:
                 x_seq_val, lengths_val = x_seq_val.to(device), lengths_val.to(device)
+                cat_val = cat_val.to(device)
                 B_val, T_val_max, D_input = x_seq_val.shape
                 mask_seq, mask_flat_val = model.generate_mask(T_val_max, lengths_val)
-                outputs_val = model(x_seq_val,lengths_val, is_training=False)
+                outputs_val = model(x_seq_val, cat_val,lengths_val, is_training=False)
                 
-                loss_elbo_val, _, _ = model.compute_loss_reconstruction_ze(x_seq_val, outputs_val["recon_dist_seq"], outputs_val["z_dist_seq"], kl_weight,  mask_seq)
+                loss_elbo_val, _, _ = model.compute_loss_reconstruction_ze(x_seq_val, outputs_val["recon_dist_seq"], outputs_val["z_dist_seq"], outputs_val["prior_dist_seq"], kl_weight,  mask_seq)
                 
                 loss_smooth_val = model.compute_loss_smoothness(outputs_val["z_e_sample_seq"], outputs_val["bmu_indices_flat_for_smooth"], model.alpha_som_q, mask_seq)
                 
                 
-                # pred_z_dist_flat = outputs_val["pred_z_dist_flat"]               
-                # loss_pred_val = model.compute_loss_prediction( pred_z_dist_flat, outputs_val["z_e_sample_seq"],mask_flat_val)
+                pred_z_dist_flat = outputs_val["pred_z_dist_flat"]
+    
                 
-                # total_epoch_loss_val += (loss_elbo_val + loss_smooth_val + loss_pred_val).item()
-                total_epoch_loss_val += (loss_elbo_val + loss_smooth_val).item()
+                loss_pred_val = model.compute_loss_prediction( pred_z_dist_flat, outputs_val["z_e_sample_seq"],mask_flat_val)
+                
+                total_epoch_loss_val += (loss_elbo_val + loss_smooth_val + loss_pred_val).item()
 
         avg_val_loss = total_epoch_loss_val / len(val_loader)
         history['val_loss'].append(avg_val_loss)
@@ -448,7 +456,7 @@ def initialize_som_from_data(model, dataloader, device, som_dim, num_classes, sa
     with torch.no_grad():
         for x, lengths, _, labels in dataloader:  # 注意：第三项是 id，最后是 label
             x, lengths, labels = x.to(device), lengths.to(device), labels.to(device)
-            out = model(x, lengths, is_training=False)
+            out = model(x, labels,lengths, is_training=False)
 
             z_seq = out['z_e_sample_seq']  # [B, T, D]
 
@@ -469,4 +477,5 @@ def initialize_som_from_data(model, dataloader, device, som_dim, num_classes, sa
     latent_matrix = torch.stack(latent_vectors)  # shape: [N, D_latent]
     model.som_layer.embeddings.data.copy_(latent_matrix)
     print(f"[SOM Init] initialize SOM embeddings：{N} vectors, each class has {samples_per_class}。")
+    
     

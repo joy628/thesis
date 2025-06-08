@@ -14,13 +14,14 @@ def collect_latents(model, data_loader, device, max_batches=20):
     model.eval()
     zs, ys = [], []
     with torch.no_grad():
-        for i, (x, lengths, _,labels) in enumerate(data_loader):
+        for i, (x_seq, x_trans, _, lengths,_,labels) in enumerate(data_loader):
             if i >= max_batches: break
-            x = x.to(device)
+            x_seq = x_seq.to(device)
             lengths = lengths.to(device)
             labels = labels.to(device)
+            x_trans = x_trans.to(device)
 
-            out = model(x, labels,lengths, is_training=False)
+            out = model(x_seq, x_trans, lengths, is_training=False)
             z_mu = out["z_dist_seq"].mean  # shape: (B, T, D), decoder 输出的 z_mu
             B, T, D = z_mu.shape
 
@@ -82,15 +83,16 @@ def analyze_latent_stats(model, data_loader, device, num_batches_to_analyze=20):
     all_kls_per_sample = []
 
     with torch.no_grad():
-        for batch_idx, (x_seq_batch, lengths_batch, _, label) in enumerate(data_loader):
+        for batch_idx, (x_seq_batch, x_trans_batch,_,lengths_batch, _, label) in enumerate(data_loader):
             if batch_idx >= num_batches_to_analyze:
                 break
 
             x_seq_batch = x_seq_batch.to(device)
             lengths_batch = lengths_batch.to(device)
             label = label.to(device)
+            x_trans_batch = x_trans_batch.to(device)
 
-            outputs = model(x_seq_batch, label,lengths_batch, is_training=False)
+            outputs = model(x_seq_batch, x_trans_batch,lengths_batch, is_training=False)
             z_dist = outputs["z_dist_seq"]  # Shape: (B, T, D)
             z_mu = z_dist.mean
             z_logvar = z_dist.stddev.pow(2).log()
@@ -163,12 +165,13 @@ def compute_som_activation_heatmap(model, data_loader, device):
     activation_counts = torch.zeros(n_nodes, dtype=torch.int32)
 
     with torch.no_grad():
-       for x_seq, lengths, _ ,cat in data_loader:
+       for x_seq, x_trans, _,lengths, _ ,cat in data_loader:
             x_seq = x_seq.to(device)
             lengths = lengths.to(device)
             cat = cat.to(device)
+            x_trans = x_trans.to(device)
 
-            outputs = model(x_seq,cat, lengths, is_training=False)
+            outputs = model(x_seq,x_trans, lengths, is_training=False)
             bmu_indices = outputs["bmu_indices_flat"]  # (B*T,)
 
             # Count BMU indices
@@ -197,14 +200,15 @@ def visualize_recons(model, data_loader, num_patients, feature_indices, feature_
     model.eval()
     with torch.no_grad():
         # 1. 取一批数据
-        x, lengths, _,cat = next(iter(data_loader))  
+        x, x_trans,_,lengths, _,cat = next(iter(data_loader))  
         x = x.to(device)
         lengths = lengths.to(device)
         cat = cat.to(device)
+        x_trans =x_trans.to(device)
         B, T_max, D_input = x.shape
 
         # 2. 获取模型输出并 reshape 重建结果
-        outputs = model(x, cat,lengths, is_training=False)
+        outputs = model(x, x_trans,lengths, is_training=False)
         if hasattr(outputs["recon_dist_seq"], 'mean'):
            x_hat = outputs["recon_dist_seq"].mean 
         if x_hat.ndim == 2 and x.ndim == 3: # 如果 mean 返回的是扁平化的 (B*T, D)
@@ -256,11 +260,12 @@ def compute_som_activation_heatmap(model, loader, device, som_dim):
     n = H*W
     counts = torch.zeros(n, dtype=torch.int32)
     with torch.no_grad():
-        for x, lengths, _, labels in loader:
+        for x, x_trans,_,lengths, _, labels in loader:
             B, T, _ = x.shape
             x, lengths = x.to(device), lengths.to(device)
             labels = labels.to(device)
-            out = model(x, labels, lengths, is_training=False)
+            x_trans = x_trans.to(device)
+            out = model(x,x_trans, lengths, is_training=False)
             bmu = out["bmu_indices_flat"]        # (B*T,)
             _, mask = model.generate_mask(T, lengths)  # (B*T,)
             valid = bmu[mask]
@@ -279,11 +284,12 @@ def compute_som_activation_by_category(model, loader, device, som_dim):
     counts = defaultdict(lambda: torch.zeros(N, dtype=torch.int32))
 
     with torch.no_grad():
-        for x, lengths, _, cat in loader:
+        for x, x_trans,_,lengths, _, cat in loader:
             x, lengths, cat = x.to(device), lengths.to(device), cat.to(device)
+            x_trans=x_trans.to(device)
             B, T, _ = x.shape
 
-            out = model(x, cat, lengths, is_training=False)
+            out = model(x, x_trans, lengths, is_training=False)
             bmu_flat = out["bmu_indices_flat"]                    # (B*T,)
             _, mask = model.generate_mask(T, lengths)             # (B*T,)
             valid_bmu = bmu_flat[mask]                            # (n_valid,)
@@ -346,11 +352,12 @@ def compute_som_avg_category(model, loader, device, som_dim):
     cnts    = torch.zeros(N, dtype=torch.int32)
 
     with torch.no_grad():
-        for x, lengths, _, cat in loader:
+        for x,x_trans,_ ,lengths, _, cat in loader:
             x, lengths, cat = x.to(device), lengths.to(device), cat.to(device)
+            x_trans=x_trans.to(device)
             B, T, _ = x.shape
 
-            out = model(x, cat, lengths, is_training=False)
+            out = model(x, x_trans, lengths, is_training=False)
             bmu_flat, = out["bmu_indices_flat"].unsqueeze(0),  # (B*T,)
             _, mask = model.generate_mask(T, lengths)          # (B*T,)
             valid_bmu = out["bmu_indices_flat"][mask]          # (n_valid,)

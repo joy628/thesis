@@ -81,20 +81,21 @@ class DMM_Module(nn.Module):
 
 
 class RetNetEncoder(nn.Module):
-    def __init__(self, input_dim, latent_dim, hidden_dim=256, layers=1, ffn_size=256, heads=2):
+    def __init__(self, input_dim,c_dim, latent_dim, hidden_dim=256, layers=1, ffn_size=256, heads=2):
         super().__init__()
-        self.input_proj = nn.Linear(input_dim, hidden_dim)
+        self.input_proj = nn.Linear(input_dim + c_dim, hidden_dim)
         self.retnet = RetNet(layers=layers, hidden_dim=hidden_dim, ffn_size=ffn_size, heads=heads)
         self.norm = nn.LayerNorm(hidden_dim)
         self.mu_proj = nn.Linear(hidden_dim, latent_dim)
         self.logvar_proj = nn.Linear(hidden_dim, latent_dim)
-        self.prior_net = ConditionalPrior(y_dim=4, latent_dim=latent_dim)
 
 
-    def forward(self, x, y,lengths=None):
+    def forward(self, x,c,lengths=None):
         # x: (B, T, input_dim)
+        # c: (B, T, condition_size)
         
-        x_proj = self.input_proj(x)  # → (B, T, hidden_dim)
+        x_cond = torch.cat([x, c], dim=-1)
+        x_proj = self.input_proj(x_cond)  # → (B, T, hidden_dim)
         h = self.retnet(x_proj)      # → (B, T, hidden_dim)
         h= self.norm(h)
         mu = self.mu_proj(h)         # → (B, T, latent_dim)
@@ -104,24 +105,22 @@ class RetNetEncoder(nn.Module):
         # D维 每个维度构造一个独立的一维正态分布 shape (B, T, latent_dim)
         distr = Independent(Normal(loc=mu, scale=std), 1)
         
-        ## learnbale prior
-        prior_dist = self.prior_net(x,y)  # shape (B, latent_dim)
- 
-        return  distr , prior_dist # Return both q(z|x) and prior p(z|y)
+        return  distr # Return both q(z|x) 
     
     
 class RetNetDecoder(nn.Module):
-    def __init__(self, latent_dim, output_dim,hidden_dim=256, layers=2, ffn_size=256, heads=2):
+    def __init__(self, latent_dim, c_dim,output_dim,hidden_dim=256, layers=2, ffn_size=256, heads=2):
         super().__init__()
-        self.input_proj = nn.Linear(latent_dim, hidden_dim)
+        self.input_proj = nn.Linear(latent_dim+c_dim, hidden_dim)
         self.retnet = RetNet(layers=layers, hidden_dim=hidden_dim, ffn_size=ffn_size, heads=heads)
         self.out_mu = nn.Linear(hidden_dim, output_dim)
         self.out_logvar = nn.Linear(hidden_dim, output_dim)
 
-    def forward(self, z,y):
+    def forward(self, z,c):
         # z: (B, T, latent_dim)
-
-        z_proj = self.input_proj(z)          # (B, T, hidden_dim)
+        # c: (B, T, condition_size)
+        z_cond = torch.cat([z, c], dim=-1)
+        z_proj = self.input_proj(z_cond)          # (B, T, hidden_dim)
         h = self.retnet(z_proj)              # (B, T, hidden_dim)
         mu = self.out_mu(h)                  # (B, T, output_dim)
 
@@ -208,7 +207,7 @@ class SOMLayer(nn.Module):
        
     
 class TSAutoencoder(nn.Module):
-    def __init__(self, input_channels, latent_dim, som_dim, lstm_dim, alpha_som_q,trans_mat_size,condition_size=4):
+    def __init__(self, input_channels, latent_dim, som_dim, lstm_dim, alpha_som_q,trans_mat_size=64,condition_size=4):
         super().__init__()
         self.input_channels = input_channels
         self.latent_dim = latent_dim
@@ -219,12 +218,12 @@ class TSAutoencoder(nn.Module):
         self.condition_size = condition_size 
 
 
-        self.encoder = RetNetEncoder(input_channels + condition_size, latent_dim)
-        self.decoder = RetNetDecoder(latent_dim+ + condition_size, input_channels)
+        self.encoder = RetNetEncoder(input_channels,self.condition_size, latent_dim)
+        self.decoder = RetNetDecoder(latent_dim,self.condition_size, input_channels)
         
         self.som_layer = SOMLayer(som_dim, latent_dim)
         
-        self.dmm_module = DMM_Module(trans_mat_size, condition_size)
+        self.dmm = DMM_Module(trans_mat_size, condition_size)
         
 
     def forward(self, x_input_seq,  x_trans_mat, lengths=None, is_training=True):
@@ -236,7 +235,7 @@ class TSAutoencoder(nn.Module):
         x_trans_mat_flat = x_trans_mat.view(B * T_max, -1)
         
         # DMM的输出
-        predicted_y_trans_mat_flat, predicted_condition_logits_flat = self.dmm_module(x_trans_mat_flat)
+        predicted_y_trans_mat_flat, predicted_condition_logits_flat = self.dmm(x_trans_mat_flat)
                 
         # 生成cVAE所需的条件向量 (停止梯度)
         with torch.no_grad():
@@ -247,20 +246,19 @@ class TSAutoencoder(nn.Module):
         conditions_c_seq = conditions_c_flat.view(B, T_max, self.condition_size)        
         
         
-        # 2. get latent distribution q(z|x) from encoder
+        # --------2. get latent distribution q(z|x) from encoder-----
         z_dist_seq = self.encoder(x_input_seq, conditions_c_seq, lengths) # [b, T_max, D_latent] 
         
-        # 3. Sample z_e from the distribution
+        # --------3. Sample z_e from the distribution--------
         if is_training:
             z_e_sample_seq = z_dist_seq.rsample() #  (B, T_max, latent_dim)
         else:
-            z_e_sample_seq = z_dist_seq.mean # Use mean during inference for stability shape (B, T_max, latent_dim)
-        
+            z_e_sample_seq = z_dist_seq.mean # Use mean during inference for stability shape (B, T_max, latent_dim)     
                     
-        # 4. VAE Decoder -> Get reconstruction distribution p(x_hat|z_e)
-        recon_dist_seq = self.decoder( z_e_sample_seq,y) # IndependentNormal, event_shape=[input_channels], batch_shape=[B,T]
-
-        # 5. SOM computations (on z_e_sample_flat)
+        # --------4. VAE Decoder -> Get reconstruction distribution p(x_hat|z_e)
+        recon_dist_seq = self.decoder(z_e_sample_seq, conditions_c_seq) # IndependentNormal, [B,T,d_features]
+        
+        #---------- 5. SOM computations (on z_e_sample_flat)
         #   Distances from z_e_sample_flat to SOM embeddings
         z_e_sample_flat = z_e_sample_seq.reshape(B * T_max, self.latent_dim)
 
@@ -276,7 +274,7 @@ class TSAutoencoder(nn.Module):
         
         z_e_sample_flat_detached = z_e_sample_seq.reshape(B * T_max, self.latent_dim).detach()
         
-        # 只更新 som embedding
+        # ------------只更新 som embedding
         z_to_som_dist_sq_flat_ng = self.som_layer.get_distances_flat(z_e_sample_flat_detached)
         q_soft_flat_ng = self.som_layer.compute_q_soft_assignments(z_to_som_dist_sq_flat_ng, self.alpha_som_q)
         
@@ -287,7 +285,6 @@ class TSAutoencoder(nn.Module):
         # Prepare outputs
         outputs = {
             "z_dist_seq": z_dist_seq,               # q(z|x) for each timestep，[B, T_max, D_latent]
-            "prior_dist_seq": prior_distr,             # p(z|y) prior distribution
             "z_e_sample_flat": z_e_sample_flat,         # Sampled z for each timestep
             "z_e_sample_seq": z_e_sample_seq,           # Sampled z, reshaped to (B, T, D)
             "recon_dist_seq": recon_dist_seq,         # p(x_hat|z) for each timestep
@@ -298,7 +295,6 @@ class TSAutoencoder(nn.Module):
             "q_soft_flat_ng": q_soft_flat_ng, 
             "bmu_indices_flat_for_smooth": bmu_indices_flat_for_smooth,
             
-
         }
         return outputs
         
@@ -333,19 +329,17 @@ class TSAutoencoder(nn.Module):
     
 
     
-    def compute_loss_reconstruction_ze(self, x_input_seq_true, recon_dist_seq, z_dist_seq, prior_distr_seq, prior_beta_vae, mask_seq):
+    def compute_loss_reconstruction_ze(self, x_input_seq_true, recon_dist_seq, z_dist_seq, prior_beta_vae, mask_seq):
         """
         x_input_seq_true: (B, T_max, D_features)
         recon_dist_seq: IndependentNormal for p(x_hat_t|z_t), batch_shape=(B, T_max), event_shape=(D_input,)
         z_dist_seq: IndependentNormal for q(z_t|x_t), batch_shape=(B, T_max), event_shape=(D_latent,)
-        prior_beta_vae: scalar, weight for KL term
+        prior_beta_vae: scalar, weight forKL term
         mask_seq: (B, T_max), boolean or float
-        prior_distr_seq: IndependentNormal for p(z|y), batch_shape=(B,T)event_shape=(D_latent,)
         """
         # Reconstruction Loss (log likelihood) 
         
         # 1）log‐likelihood per‐timestep → (B,T)    
-        # D = x_input_seq_true.size(-1)
         log_p = recon_dist_seq.log_prob(x_input_seq_true)
         mask_f = mask_seq.float()
         
@@ -356,7 +350,12 @@ class TSAutoencoder(nn.Module):
         recon_loss = - per_seq_lp.mean()
         
         # KL Divergence
-        kl_t = kl_divergence(z_dist_seq, prior_distr_seq)        # (B,T)
+        # Create prior: N(0,I) for each z_t. batch_shape=(B, T_max), event_shape=(D_latent,)
+
+        # kl_divergence(z_dist_seq, prior_dist) will have shape (B, T_max)
+        prior = Independent(Normal(torch.zeros_like(z_dist_seq.mean),
+                                torch.ones_like(z_dist_seq.stddev)), 1)
+        kl_t = kl_divergence(z_dist_seq, prior)        # (B,T)
         per_seq_kl = (kl_t * mask_f).sum(dim=1) / mask_f.sum(dim=1).clamp(min=1)
         kl_loss = per_seq_kl.mean()
         
@@ -479,7 +478,7 @@ class TSAutoencoder(nn.Module):
         loss = -torch.sum(q_smooth_val * final_mask) / final_mask.sum().clamp(min=1)
         return loss
     
-    
+
 
     # --- Methods for pretraining SOM (standard SOM losses) ---
     def compute_loss_commit_sd_pretrain(self, z_e_sample_flat, z_q_flat):

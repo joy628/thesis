@@ -100,9 +100,8 @@ def train_patient_outcome_model(model,
             for _,flat_data,ts_data, graph_data,_, ts_lengths, cat, _,_ in tqdm(train_loader_for_p, desc=f"[Joint E{ep+1}] Calc Global P", leave=False):
                 flat_data, ts_data, ts_lengths = flat_data.to(device), ts_data.to(device), ts_lengths.to(device)
                 graph_data = graph_data.to(device)
-                cat = cat.to(device)
                 
-                outputs = model(flat_data, graph_data, ts_data,cat,ts_lengths)
+                outputs = model(flat_data, graph_data, ts_data,ts_lengths)
                 
                 _, mask_p_flat_bool = model.generate_mask(ts_data.size(1), ts_lengths)
                 
@@ -123,7 +122,6 @@ def train_patient_outcome_model(model,
             
             flat_data, ts_data, ts_lengths = flat_data.to(device), ts_data.to(device), ts_lengths.to(device)
             graph_data = graph_data.to(device)
-            categories = categories.to(device)
             y_risk_true, y_mortality_true =risk.to(device),mortality.to(device)        
             original_indices = original_indices.to(device)
              
@@ -147,7 +145,7 @@ def train_patient_outcome_model(model,
                 
             optimizer.zero_grad()
             
-            output = model(flat_data, graph_data, ts_data, categories,ts_lengths)
+            output = model(flat_data, graph_data, ts_data, ts_lengths)
             
             _, mask_p_flat = model.generate_mask(ts_data.size(1), ts_lengths)
             
@@ -161,8 +159,7 @@ def train_patient_outcome_model(model,
                            
             
             
-            loss_cah = model.compute_loss_commit_cah(p_batch_target_valid_timesteps, q_soft_flat_valid)  
-            
+            loss_cah = model.compute_loss_commit_cah(p_batch_target_valid_timesteps, q_soft_flat_valid)             
             loss_s_som = model.compute_loss_s_som(q_soft_flat_valid, q_soft_flat_ng_valid)
              
             # === som smoothness loss ===
@@ -204,15 +201,15 @@ def train_patient_outcome_model(model,
                 
                 flat_data, ts_data, ts_lengths = flat_data.to(device), ts_data.to(device), ts_lengths.to(device)
                 graph_data = graph_data.to(device)
-                categories = categories.to(device)
                 
                 y_risk_true, y_mortality_true =risk.to(device),mortality.to(device)
                 
                 
-                output_val = model(flat_data, graph_data, ts_data, categories,ts_lengths)
+                output_val = model(flat_data, graph_data, ts_data,ts_lengths)
+                
+                            
                 
                 # === som loss 
-                
                 mask_seq_risk_bool, _ = model.generate_mask(ts_data.size(1), ts_lengths)
                 mask_seq_risk = mask_seq_risk_bool.float()
                 

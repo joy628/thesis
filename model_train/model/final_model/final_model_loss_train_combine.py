@@ -97,12 +97,11 @@ def train_patient_outcome_model(model,
         model.eval()
         all_q_list_for_p_epoch = [] # 每个有效时间步对som节点的q值。 soft assignment
         with torch.no_grad():
-            for _,flat_data,ts_data, graph_data,_, ts_lengths, cat, _,_ in tqdm(train_loader_for_p, desc=f"[Joint E{ep+1}] Calc Global P", leave=False):
+            for _,flat_data,ts_data, graph_data,_, ts_lengths, _,_,_ in tqdm(train_loader_for_p, desc=f"[Joint E{ep+1}] Calc Global P", leave=False):
                 flat_data, ts_data, ts_lengths = flat_data.to(device), ts_data.to(device), ts_lengths.to(device)
                 graph_data = graph_data.to(device)
-                cat = cat.to(device)
                 
-                outputs = model(flat_data, graph_data, ts_data,cat,ts_lengths)
+                outputs = model(flat_data, graph_data, ts_data,ts_lengths)
                 
                 _, mask_p_flat_bool = model.generate_mask(ts_data.size(1), ts_lengths)
                 
@@ -119,11 +118,10 @@ def train_patient_outcome_model(model,
         model.train()
         current_epoch_losses = {key: 0.0 for key in history if 'train_' in key}
         
-        for _,flat_data,ts_data, graph_data ,risk, ts_lengths,categories, mortality, original_indices in train_loader:
+        for _,flat_data,ts_data, graph_data ,risk, ts_lengths,_, mortality, original_indices in train_loader:
             
             flat_data, ts_data, ts_lengths = flat_data.to(device), ts_data.to(device), ts_lengths.to(device)
             graph_data = graph_data.to(device)
-            categories = categories.to(device)
             y_risk_true, y_mortality_true =risk.to(device),mortality.to(device)        
             original_indices = original_indices.to(device)
              
@@ -147,7 +145,7 @@ def train_patient_outcome_model(model,
                 
             optimizer.zero_grad()
             
-            output = model(flat_data, graph_data, ts_data, categories,ts_lengths)
+            output = model(flat_data, graph_data, ts_data,ts_lengths)
             
             _, mask_p_flat = model.generate_mask(ts_data.size(1), ts_lengths)
             
@@ -216,7 +214,7 @@ def train_patient_outcome_model(model,
                 y_risk_true, y_mortality_true =risk.to(device),mortality.to(device)
                 
                 
-                output_val = model(flat_data, graph_data, ts_data, categories,ts_lengths)
+                output_val = model(flat_data, graph_data, ts_data, ts_lengths)
                 
                 # === som loss 
                 
@@ -391,7 +389,7 @@ def plot_patient_risk_score(model, dataset, patient_index, device):
     lengths    = torch.tensor([ts.size(0)], dtype=torch.long, device=device)  # [1]
 
     with torch.no_grad():
-        out = model(flat_batch, graph_batch, ts_batch, cat_batch, lengths)
+        out = model(flat_batch, graph_batch, ts_batch, lengths)
         pred = out['risk_scores'][0, :lengths.item()].cpu().numpy()
         true = risk[:lengths.item()].numpy()
 
@@ -428,7 +426,7 @@ def compute_som_activation_heatmap(model, loader, device, som_dim):
             lengths  = lengths.to(device)
             cat      = cat.to(device)
 
-            out = model(flat_x, graph_data, ts_x, cat, lengths)
+            out = model(flat_x, graph_data, ts_x, lengths)
             bmu_flat = out["aux_info"]["bmu_indices_flat"]    # (B*T,)
             B, T = ts_x.shape[0], ts_x.shape[1]
             _, mask_flat = model.generate_mask(T, lengths)    # (B*T,)
@@ -482,7 +480,7 @@ def compute_som_avg_risk(model, loader, device, som_dim):
             graph_data.batch      = graph_data.batch.to(device)
 
             # 前向
-            out = model(flat_x, graph_data, ts_x, cat, lengths)
+            out = model(flat_x, graph_data, ts_x,  lengths)
             bmu = out["aux_info"]["bmu_indices_flat"]  # (B*T,)
             B, T = ts_x.shape[:2]
 

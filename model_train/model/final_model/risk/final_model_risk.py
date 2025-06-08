@@ -41,10 +41,10 @@ class TimeSeriesEncoder(nn.Module):
         super().__init__()
         self.pretrained_encoder = pretrained_vae_encoder 
 
-    def forward(self, x_input_seq,y,length=None): # x_input_seq: (B, T_max, D_original_features)
+    def forward(self, x_input_seq,length=None): # x_input_seq: (B, T_max, D_original_features)
                        
         # 1. Get latent distribution from pretrained VAE Encoder
-        z_dist_flat = self.pretrained_encoder(x_input_seq,y,length) 
+        z_dist_flat = self.pretrained_encoder(x_input_seq,length) 
         
         # 2. Get point estimate (mean) for the latent representation
         z_e_sample_flat = z_dist_flat.mean 

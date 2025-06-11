@@ -6,9 +6,7 @@ import matplotlib.pyplot as plt
 from matplotlib.collections import LineCollection
 from matplotlib.colors import Normalize
 from tqdm import tqdm
-
-
-
+from torch_geometric.data import Batch
 
 
 

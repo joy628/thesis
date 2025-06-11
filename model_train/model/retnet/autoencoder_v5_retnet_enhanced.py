@@ -9,7 +9,7 @@ sys.path.append('/home/mei/nas/docker/thesis/model_train/model')
 from  retnet.retnetModule.retnet import RetNet
 
 class RetNetEncoder(nn.Module):
-    def __init__(self, input_dim, latent_dim, hidden_dim=256, layers=1, ffn_size=256, heads=2):
+    def __init__(self, input_dim, latent_dim, hidden_dim=512, layers=3, ffn_size=1024, heads=4):
         super().__init__()
         self.input_proj = nn.Linear(input_dim, hidden_dim)
         self.retnet = RetNet(layers=layers, hidden_dim=hidden_dim, ffn_size=ffn_size, heads=heads)
@@ -34,7 +34,7 @@ class RetNetEncoder(nn.Module):
     
     
 class RetNetDecoder(nn.Module):
-    def __init__(self, latent_dim, output_dim,hidden_dim=256, layers=2, ffn_size=256, heads=2):
+    def __init__(self, latent_dim, output_dim,hidden_dim=512, layers=3, ffn_size=1024, heads=4):
         super().__init__()
         self.input_proj = nn.Linear(latent_dim , hidden_dim)
         self.retnet = RetNet(layers=layers, hidden_dim=hidden_dim, ffn_size=ffn_size, heads=heads)
@@ -319,7 +319,7 @@ class TSAutoencoder(nn.Module):
         p_target = p_num / torch.sum(p_num, dim=1, keepdim=True) # Normalize over clusters for each sample
         return p_target.detach() # Detach as p is a target
 
-    def compute_loss_commit_cah(self, p_target_flat, q_soft_flat): # KL(P||Q) gamma 
+    def compute_loss_commit_cah(self, p_target_flat, q_soft_flat): # KL(P||Q) ,gamma=100
         # p_target_flat: (N, H*W)
         # q_soft_flat: (N, H*W)
         # Ensure q_soft_flat has epsilon for log stability if not already added
@@ -329,7 +329,7 @@ class TSAutoencoder(nn.Module):
         loss = torch.sum(p_target_flat * (torch.log(p_target_flat + eps) - torch.log(q_soft_flat + eps)), dim=1)
         return torch.mean(loss)
 
-    def compute_loss_s_som(self, q_soft_flat, q_soft_flat_ng): # Soft SOM Loss    beta weight
+    def compute_loss_s_som(self, q_soft_flat, q_soft_flat_ng): # Soft SOM Loss， beta= 100
         # q_soft_flat: (N, H*W), current q with gradients to encoder
         # q_soft_flat_ng: (N, H*W), q calculated with z_e_sample.detach(), grads only to SOM embeddings
         
@@ -393,7 +393,7 @@ class TSAutoencoder(nn.Module):
             loss = - (masked_log_p_sum / num_valid_timesteps_total)
             return loss
 
-    def compute_loss_smoothness(self, z_e_sample_seq, bmu_indices_flat, alpha_som_q, mask_seq): #
+    def compute_loss_smoothness(self, z_e_sample_seq, bmu_indices_flat, alpha_som_q, mask_seq): #kappa 
 
 
         B, T, D_latent = z_e_sample_seq.shape

@@ -15,28 +15,13 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 bce_loss_fn = nn.BCELoss(reduction='none')
 
-def unfreeze(module):
-    for p in module.parameters():
-        p.requires_grad = True
-
-def freeze(module):
-    for p in module.parameters():
+def freeze_all(model):
+    for p in model.parameters():
         p.requires_grad = False
 
-def build_patient_start_offset_dict(train_loader_for_p):
-    print("[Joint] Building patient_start_offset_global as dict...")
-    offset_dict = {} # 记录每个病人序列在全局序列中的起始位置
-    current_offset = 0 # 累加所有病人序列的长度
-    with torch.no_grad():
-        for _, _, _, _,_, lengths_batch, _, _,original_indices_batch in train_loader_for_p:
-            
-            lengths_batch = lengths_batch.cpu()
-            original_indices_batch = original_indices_batch.cpu()
-            for orig_idx, seq_len in zip(original_indices_batch, lengths_batch):
-                offset_dict[int(orig_idx)] = current_offset
-                current_offset += int(seq_len)
-    print(f"[Joint] Offset dict built for {len(offset_dict)} patients. Total length: {current_offset}")
-    return offset_dict 
+def unfreeze_module(module):
+    for p in module.parameters():
+        p.requires_grad = True
 
 # === Early Stopping Helper ===
 class EarlyStopping:
@@ -63,13 +48,14 @@ class EarlyStopping:
 # === Training Loop ===
 
 def train_patient_outcome_model(model, 
-            train_loader, val_loader, train_loader_for_p, device, optimizer,  epochs: int, save_dir: str, 
-            theta=1, gamma=100, kappa=1, beta=10, eta=1,
-            patience: int = 20 ):
+            train_loader, val_loader,  device, optimizer,  epochs: int, save_dir: str, 
+             patience: int = 20 ):
 
-    for param in model.parameters():
-        param.requires_grad = True
-    
+    freeze_all(model.ts_encoder)
+    freeze_all(model.som_layer)
+    for name, param in model.named_parameters():
+         if not (name.startswith("ts_encoder") or name.startswith("som_layer")):
+             param.requires_grad = True
     
     os.makedirs(save_dir, exist_ok=True)
     
@@ -77,44 +63,15 @@ def train_patient_outcome_model(model,
     best_model_wts = copy.deepcopy(model.state_dict())
     history = {
         'train_loss': [], 'val_loss': [], 'cat':[],
-        'train_risk': [],  'train_mortality': [],
-        'train_cah': [], 'train_s_som': [], 'train_smooth': []
+        'train_risk': [], 'train_smooth': [], 'train_mortality': []
     }
 
     scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=patience // 2 if patience > 0 else 5)
     no_improve_val_epochs = 0
     
-    #  计算每个病人在全局序列中的起始位置，包含病人的 固定索引
-    patient_start_offset_global_dict = build_patient_start_offset_dict(train_loader_for_p)
 
-    p_target_train_global_flat_current_epoch = None
     for ep in range(epochs):
-        
-        #周期性更新 全局的 P_target
-        if (ep+1) % 10 == 0:
-            print(f"[Joint] Ep{ep+1}: Calculating global target P...")
-        
-        model.eval()
-        all_q_list_for_p_epoch = [] # 每个有效时间步对som节点的q值。 soft assignment
-        with torch.no_grad():
-            for _,flat_data,ts_data, graph_data,_, ts_lengths, _,_,_ in tqdm(train_loader_for_p, desc=f"[Joint E{ep+1}] Calc Global P", leave=False):
-                flat_data, ts_data, ts_lengths = flat_data.to(device), ts_data.to(device), ts_lengths.to(device)
-                graph_data = graph_data.to(device)
-                
-                outputs = model(flat_data, graph_data, ts_data,ts_lengths)
-                
-                _, mask_p_flat_bool = model.generate_mask(ts_data.size(1), ts_lengths)
-                
-                q_for_p_batch_valid = outputs["aux_info"]["q"][mask_p_flat_bool]
-                               
-                all_q_list_for_p_epoch.append(q_for_p_batch_valid.cpu())
-        
-        q_train_all_valid_timesteps_epoch = torch.cat(all_q_list_for_p_epoch, dim=0)
-        p_target_train_global_flat_current_epoch = model.compute_target_distribution_p(q_train_all_valid_timesteps_epoch).to(device)
-        if ep+1 % 10 == 0:
-              print(f"[Joint] Ep{ep+1} Global P updated. Shape: {p_target_train_global_flat_current_epoch.shape}")
-                   
-        
+  
         model.train()
         current_epoch_losses = {key: 0.0 for key in history if 'train_' in key}
         
@@ -128,54 +85,26 @@ def train_patient_outcome_model(model,
              
             B_actual, T_actual_max, D_input = ts_data.shape
             mask_seq, mask_flat_bool = model.generate_mask(T_actual_max, ts_lengths)
-            
-            p_batch_target_list = [] # 当前batch中每个病人有效时间步的 目标分布
-            
-            for i in range(B_actual):
-                orig_idx = original_indices[i].item() # 当前病人的原始索引
-                len_actual = ts_lengths[i].item() # 当前病人的实际长度
-                start_idx = patient_start_offset_global_dict.get(orig_idx, None) # 查找病人在全局序列中的起始位置
-                if start_idx is None:
-                    raise ValueError(f"Patient idx {orig_idx} not found in offset dict!")
-                end_idx = start_idx + len_actual 
-                p_patient_valid = p_target_train_global_flat_current_epoch[start_idx:end_idx] # 该病人的有效时间步目标分布
-                p_batch_target_list.append(p_patient_valid) 
-            p_batch_target_valid_timesteps = torch.cat(p_batch_target_list, dim=0) # 得到当前batch中所有病人有效时间步的目标分布
 
-                
             optimizer.zero_grad()
             
             output = model(flat_data, graph_data, ts_data,ts_lengths)
             
-            _, mask_p_flat = model.generate_mask(ts_data.size(1), ts_lengths)
-            
-            q_soft_flat_valid    = output["aux_info"]["q"][mask_p_flat]
-            q_soft_flat_ng_valid = output["aux_info"]["q_ng"][mask_p_flat]
-            
-            if p_batch_target_valid_timesteps.shape[0] != q_soft_flat_valid.shape[0]:
-                print(f"Warning: P-Q mismatch, falling back to uniform P.")
-                num_valid_steps = q_soft_flat_valid.shape[0]
-                p_batch_target_valid_timesteps = torch.ones(num_valid_steps, model.som_layer.n_nodes, device=device) / model.som_layer.n_nodes
-                           
-            
-            
-            loss_cah = model.compute_loss_commit_cah(p_batch_target_valid_timesteps, q_soft_flat_valid)  
-            
-            loss_s_som = model.compute_loss_s_som(q_soft_flat_valid, q_soft_flat_ng_valid)
              
-            # === som smoothness loss ===
+            # === 1. som smoothness loss ===
             z_e_sample_seq = output["z_e_seq"]
             bmu_indices_flat = output["aux_info"]["bmu_indices_flat"] # shape: (B*T_max,)
             loss_smooth = model.compute_loss_smoothness(
-              z_e_sample_seq, bmu_indices_flat, model.alpha_som_q, mask_seq)
+                                 z_e_sample_seq, bmu_indices_flat, model.alpha_som_q, mask_seq)
             
-            ## ===1. prediction loss
+            
+            ## ===2. prediction loss
             risk_scores_pred = output["risk_scores"] # (B, T)
             mask_seq_risk_bool, _ = model.generate_mask(ts_data.size(1), ts_lengths)
             mask_seq_risk = mask_seq_risk_bool.float()
             loss_risk_elementwise = bce_loss_fn(risk_scores_pred, y_risk_true) # (B, T)
             loss_risk = (loss_risk_elementwise * mask_seq_risk).sum() / mask_seq_risk.sum().clamp(min=1) 
-            ## ===2. mortality prediction loss
+            ## ===3. mortality prediction loss
             mortality_prob_pred = output["mortality_prob"] # (B, T)
             
             if mortality_prob_pred.dim() > 1:
@@ -186,14 +115,12 @@ def train_patient_outcome_model(model,
             loss_mortality = F.binary_cross_entropy(prob_last, y_mortality_true.float())
 
 
-            total_loss = theta * loss_risk + gamma * loss_cah + beta * loss_s_som + kappa * loss_smooth + eta * loss_mortality
+            total_loss = loss_risk + loss_smooth +  loss_mortality
             total_loss.backward()
             optimizer.step()
 
             current_epoch_losses['train_loss'] += total_loss.item()
             current_epoch_losses['train_risk'] += loss_risk.item()
-            current_epoch_losses['train_cah'] += loss_cah.item()
-            current_epoch_losses['train_s_som'] += loss_s_som.item()
             current_epoch_losses['train_smooth'] += loss_smooth.item()
             current_epoch_losses['train_mortality'] += loss_mortality.item()
 
@@ -216,7 +143,7 @@ def train_patient_outcome_model(model,
                 
                 output_val = model(flat_data, graph_data, ts_data, ts_lengths)
                 
-                # === som loss 
+                # ===1. som loss =====
                 
                 mask_seq_risk_bool, _ = model.generate_mask(ts_data.size(1), ts_lengths)
                 mask_seq_risk = mask_seq_risk_bool.float()
@@ -224,7 +151,7 @@ def train_patient_outcome_model(model,
                 
                 loss_smooth_val = model.compute_loss_smoothness(output_val["z_e_seq"], output_val["aux_info"]["bmu_indices_flat"], model.alpha_som_q,mask_seq_risk)                
                 
-                # === 1. prediction loss
+                # === 2. prediction loss
                 risk_scores_pred = output_val["risk_scores"] # (B, T)
                 
                 loss_risk_elementwise = bce_loss_fn(risk_scores_pred, y_risk_true) # (B, T)
@@ -233,7 +160,7 @@ def train_patient_outcome_model(model,
                 per_risk = (loss_risk_elementwise * mask_seq_risk).sum(dim=1) / mask_seq_risk.sum(dim=1).clamp(min=1)
                 
                 
-                ## ===2. mortality prediction loss
+                ## ===3. mortality prediction loss
                 mortality_prob_pred = output_val["mortality_prob"] # (B, 1) or (B)
                             
                 if mortality_prob_pred.dim() > 1:

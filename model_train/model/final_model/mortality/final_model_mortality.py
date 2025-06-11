@@ -9,7 +9,7 @@ from torch.distributions import Normal, kl_divergence, Independent
 
 
 # === Flat Encoder ===
-class FlatFeatureEncoder(nn.Module):
+class FlatFeatureEncoder(nn.Module): ## hidden dim 减小
     def __init__(self, input_dim, hidden_dim):
         super().__init__()
         self.fc = nn.Sequential(

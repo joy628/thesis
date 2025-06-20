@@ -13,7 +13,9 @@ import copy
 from torch_geometric.data import Batch
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
-bce_loss_fn = nn.BCELoss(reduction='none')
+from sklearn.metrics import roc_auc_score, average_precision_score, precision_score, recall_score, f1_score, mean_squared_error
+
+
 
 def unfreeze(module):
     for p in module.parameters():
@@ -64,7 +66,7 @@ class EarlyStopping:
 
 def train_patient_outcome_model(model, 
             train_loader, val_loader, train_loader_for_p, device, optimizer,  epochs: int, save_dir: str, 
-            theta=1, gamma=50, kappa=1, beta=10, eta=1,
+            gamma=100, beta=10,kappa=1, eta=1,
             patience: int = 20 ):
 
     for param in model.parameters():
@@ -78,7 +80,7 @@ def train_patient_outcome_model(model,
     history = {
         'train_loss': [], 'val_loss': [], 'cat':[],
         'train_risk': [],  'train_mortality': [],
-        'train_cah': [], 'train_s_som': [], 'train_smooth': []
+        'train_cah': [], 'train_s_som': [], 'train_smooth': [],
     }
 
     scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=patience // 2 if patience > 0 else 5)
@@ -97,7 +99,7 @@ def train_patient_outcome_model(model,
         model.eval()
         all_q_list_for_p_epoch = [] # 每个有效时间步对som节点的q值。 soft assignment
         with torch.no_grad():
-            for _,flat_data,ts_data, graph_data,_, ts_lengths, cat, _,_ in tqdm(train_loader_for_p, desc=f"[Joint E{ep+1}] Calc Global P", leave=False):
+            for _,flat_data,ts_data, graph_data,_, ts_lengths, _,_,_ in tqdm(train_loader_for_p, desc=f"[Joint E{ep+1}] Calc Global P", leave=False):
                 flat_data, ts_data, ts_lengths = flat_data.to(device), ts_data.to(device), ts_lengths.to(device)
                 graph_data = graph_data.to(device)
                 
@@ -118,7 +120,7 @@ def train_patient_outcome_model(model,
         model.train()
         current_epoch_losses = {key: 0.0 for key in history if 'train_' in key}
         
-        for _,flat_data,ts_data, graph_data ,risk, ts_lengths,categories, mortality, original_indices in train_loader:
+        for _,flat_data,ts_data, graph_data ,risk, ts_lengths,_, mortality, original_indices in train_loader:
             
             flat_data, ts_data, ts_lengths = flat_data.to(device), ts_data.to(device), ts_lengths.to(device)
             graph_data = graph_data.to(device)
@@ -145,7 +147,7 @@ def train_patient_outcome_model(model,
                 
             optimizer.zero_grad()
             
-            output = model(flat_data, graph_data, ts_data, ts_lengths)
+            output = model(flat_data, graph_data, ts_data,ts_lengths)
             
             _, mask_p_flat = model.generate_mask(ts_data.size(1), ts_lengths)
             
@@ -159,7 +161,8 @@ def train_patient_outcome_model(model,
                            
             
             
-            loss_cah = model.compute_loss_commit_cah(p_batch_target_valid_timesteps, q_soft_flat_valid)             
+            loss_cah = model.compute_loss_commit_cah(p_batch_target_valid_timesteps, q_soft_flat_valid)  
+            
             loss_s_som = model.compute_loss_s_som(q_soft_flat_valid, q_soft_flat_ng_valid)
              
             # === som smoothness loss ===
@@ -168,26 +171,37 @@ def train_patient_outcome_model(model,
             loss_smooth = model.compute_loss_smoothness(
               z_e_sample_seq, bmu_indices_flat, model.alpha_som_q, mask_seq)
             
-            ## ===2. mortality prediction loss
-            mortality_prob_pred = output["mortality_prob"] # (B, T)
             
-            if mortality_prob_pred.dim() > 1:
-                 prob_last = mortality_prob_pred[:, -1]
-            else:
-                prob_last = mortality_prob_pred.squeeze(-1)
-                
-            loss_mortality = F.binary_cross_entropy(prob_last, y_mortality_true.float())
+            ## ===2. mortality prediction loss  BCE loss
+            mortality_prob_pred = output["mortality_prob"] # (B, T)
 
+            # B = mortality_prob_pred.size(0)
+            # mortality_prob_pred_last = mortality_prob_pred[torch.arange(B), ts_lengths-1]
+            # loss_mortality_vec = F.binary_cross_entropy(  mortality_prob_pred_last,  y_mortality_true.float(), reduction='none')  # (B)  
+            # loss_mortality =  loss_mortality_vec.mean()
 
-            total_loss =  gamma * loss_cah + beta * loss_s_som + kappa * loss_smooth + eta * loss_mortality
+            # bce ##
+            mask_seq_mortality_bool, _ = model.generate_mask(ts_data.size(1), ts_lengths)
+            mask_seq_mortality = mask_seq_mortality_bool.float()
+            y_mortality_true = y_mortality_true.float().unsqueeze(1).expand_as(mortality_prob_pred)          # [B, T]
+            
+            loss_mortality_elementwise = F.binary_cross_entropy( mortality_prob_pred,  y_mortality_true, reduction='none')  # (B)
+
+            loss_mortality = (loss_mortality_elementwise * mask_seq_mortality).sum() / mask_seq_mortality.sum().clamp(min=1)
+
+            total_loss =  gamma * loss_cah + beta * loss_s_som + kappa * loss_smooth + eta * loss_mortality 
+            
+            
             total_loss.backward()
             optimizer.step()
 
             current_epoch_losses['train_loss'] += total_loss.item()
+            
             current_epoch_losses['train_cah'] += loss_cah.item()
             current_epoch_losses['train_s_som'] += loss_s_som.item()
             current_epoch_losses['train_smooth'] += loss_smooth.item()
             current_epoch_losses['train_mortality'] += loss_mortality.item()
+          
 
         for key in current_epoch_losses:
             history[key].append(current_epoch_losses[key] / len(train_loader))
@@ -201,62 +215,56 @@ def train_patient_outcome_model(model,
                 
                 flat_data, ts_data, ts_lengths = flat_data.to(device), ts_data.to(device), ts_lengths.to(device)
                 graph_data = graph_data.to(device)
+                categories = categories.to(device)
                 
                 y_risk_true, y_mortality_true =risk.to(device),mortality.to(device)
                 
                 
-                output_val = model(flat_data, graph_data, ts_data,ts_lengths)
-                
-                            
+                output_val = model(flat_data, graph_data, ts_data, ts_lengths)
                 
                 # === som loss 
-                mask_seq_risk_bool, _ = model.generate_mask(ts_data.size(1), ts_lengths)
-                mask_seq_risk = mask_seq_risk_bool.float()
                 
-                
-                loss_smooth_val = model.compute_loss_smoothness(output_val["z_e_seq"], output_val["aux_info"]["bmu_indices_flat"], model.alpha_som_q,mask_seq_risk)                
-                
-                
+                mask_seq_bool, _ = model.generate_mask(ts_data.size(1), ts_lengths)
+                mask_seq = mask_seq_bool.float()
+
+
+
                 ## ===2. mortality prediction loss
-                mortality_prob_pred = output_val["mortality_prob"] # (B, 1) or (B)
-                            
-                if mortality_prob_pred.dim() > 1:
-                    prob_last = mortality_prob_pred[:, -1]
-                else:
-                    prob_last = mortality_prob_pred.squeeze(-1)
-                    
-                loss_mortality_el = F.binary_cross_entropy(prob_last, y_mortality_true.float())
-                
-                loss_mortality = (loss_mortality_el* mask_seq_risk).sum() / mask_seq_risk.sum().clamp(min=1) 
-                
-                # per mortality
-                per_mort = (loss_mortality * mask_seq_risk).sum(dim=1) / mask_seq_risk.sum(dim=1).clamp(min=1)
-                 
-                total_epoch_loss_val +=  (loss_mortality+loss_smooth_val).item()
-                per_patient_losses += ( per_mort).cpu().tolist()
-                per_patient_cats   += categories.cpu().tolist()
-                
-        ## print all loss
-        if (ep + 1) % 10 == 0:
-            print(f"[Joint] Epoch {ep + 1}/{epochs} - "
-                f"Train Loss: {current_epoch_losses['train_loss']:.4f}, "
-                f"Mortality Loss: {current_epoch_losses['train_mortality']:.4f}, "
-                f"Val Loss: {total_epoch_loss_val:.4f}")           
+                mortality_prob_pred_val = output_val["mortality_prob"] # (B, T)
+
+                # B = mortality_prob_pred_val.size(0)
+                # mortality_prob_pred_last_val = mortality_prob_pred_val[torch.arange(B), ts_lengths-1]
+                # loss_mortality_vec = F.binary_cross_entropy(  mortality_prob_pred_last_val,  y_mortality_true.float(), reduction='none')  # (B)  
+                # loss_mortality_val =  loss_mortality_vec.mean()
+                # bce ##
+                mask_seq_mortality_bool, _ = model.generate_mask(ts_data.size(1), ts_lengths)
+                mask_seq_mortality = mask_seq_mortality_bool.float()
+                y_mortality_full_val = y_mortality_true.float().unsqueeze(1).expand_as(mortality_prob_pred_val)   # [B, T]
+                loss_mortality_elementwise_val = F.binary_cross_entropy( mortality_prob_pred_val,  y_mortality_full_val, reduction='none')
+                loss_mortality_val = (loss_mortality_elementwise_val * mask_seq_mortality).sum() / mask_seq_mortality.sum().clamp(min=1)
+               
+                total_epoch_loss_val += (loss_mortality_val).item()
+
+                # # per mortality
+                # per_mort = (loss_mortality_elementwise * mask_seq).sum(dim=1) / mask_seq.sum(dim=1).clamp(min=1)
+                # per_patient_losses += (per_risk + per_mort).cpu().tolist()
+                # per_patient_cats   += categories.cpu().tolist()
+
 
         avg_val_loss = total_epoch_loss_val / len(val_loader)
         history['val_loss'].append(avg_val_loss)
         
-        hist_cat = {}
-        losses_t = torch.tensor(per_patient_losses)
-        cats_t   = torch.tensor(per_patient_cats)
-        for i in range(4):
-           sel = cats_t == i
-           if sel.any():
-                group = losses_t[sel]
-                hist_cat[i] = (group.mean().item(), int(sel.sum().item()))
+        # hist_cat = {}
+        # losses_t = torch.tensor(per_patient_losses)
+        # cats_t   = torch.tensor(per_patient_cats)
+        # for i in range(4):
+        #    sel = cats_t == i
+        #    if sel.any():
+        #         group = losses_t[sel]
+        #         hist_cat[i] = (group.mean().item(), int(sel.sum().item()))
                 
-        history['cat'].append(hist_cat)
-        scheduler.step(avg_val_loss)
+        # history['cat'].append(hist_cat)
+        # scheduler.step(avg_val_loss)
 
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
@@ -284,50 +292,112 @@ def train_patient_outcome_model(model,
             
         
 
-# def evaluate_model_on_test_set(model, test_loader,  device):
-#     model.eval()
-#     all_losses = []
-#     all_categories = []
-#     test_loss_total = 0.0
+#===== evaluation function ====
 
-#     with torch.no_grad():
-#         for batch in tqdm(test_loader, desc="[Test] Evaluating"):
-#             _, flat_data, ts_data, graph_data,risk_data, lengths, risk_category, mortality_labels = batch
-#             flat_data = flat_data.to(device)
-#             ts_data = ts_data.to(device)
-#             graph_data = graph_data.to(device)
-#             risk_data = risk_data.to(device)
-#             lengths = lengths.to(device)
-#             risk_category = risk_category.to(device)
-#             mortality_labels = mortality_labels.to(device)
-
-#             pred, _, _, _, mortality_prob,_, _  = model(flat_data, graph_data, ts_data, lengths)
-
-#             loss, _, batch_losses = compute_risk_loss(pred, risk_data, lengths, risk_category,mortality_prob,mortality_labels)
-
-#             test_loss_total += loss.item()
-#             all_losses.extend(batch_losses.cpu().tolist())
-#             all_categories.extend(risk_category.cpu().tolist())
-
-#     # === Category-wise loss summary ===
-#     category_results = {}
-#     for i in range(4):
-#         cls_losses = [l for l, c in zip(all_losses, all_categories) if c == i]
-#         category_results[i] = {
-#             "avg_loss": float(np.mean(cls_losses)) if cls_losses else float('nan'),
-#             "count": len(cls_losses)
-#         }
-
-#     avg_test_loss = test_loss_total / len(test_loader)
-
-#     print("\n[Test] Evaluation Summary:")
-#     print(f"  Overall Test Loss: {avg_test_loss:.4f}")
-#     for i in range(4):
-#         res = category_results[i]
-#         print(f"  Risk Category {i}: Mean Loss = {res['avg_loss']:.4f}, Count = {res['count']}")
-
-
-#     return avg_test_loss, category_results
+from sklearn.metrics import precision_recall_curve
 
 
 
+def test_patient_outcome_model(model, test_loader, device):
+    model.eval()
+    
+    all_mort_preds, all_mort_trues = [], []
+
+    # 记录 per-patient loss
+    per_patient_mort_losses = []
+    per_patient_cats = []
+
+    with torch.no_grad():
+        for _, flat_data, ts_data, graph_data, risk, ts_lengths, categories, mortality, _ in test_loader:
+            flat_data, ts_data, ts_lengths = flat_data.to(device), ts_data.to(device), ts_lengths.to(device)
+            graph_data = graph_data.to(device)
+            categories = categories.to(device)
+            y_risk_true, y_mortality_true = risk.to(device), mortality.to(device)
+
+            output = model(flat_data, graph_data, ts_data, ts_lengths)
+            mask_seq_bool, _ = model.generate_mask(ts_data.size(1), ts_lengths)
+            mask_seq = mask_seq_bool.float()
+
+
+            
+            # 2. Mortality classification
+            # mortality_prob_pred = output["mortality_prob"]  # (B, T)
+            # mort_preds_flat = mortality_prob_pred.view(-1)[mask_flat].cpu().numpy()
+            # mort_trues_flat = y_mortality_true.view(-1)[mask_flat].cpu().numpy()
+            # all_mort_preds.extend(mort_preds_flat)
+            # all_mort_trues.extend(mort_trues_flat)
+            
+            B = ts_data.size(0)
+            idx = torch.arange(B, device=device)
+            last_idx = (ts_lengths - 1).clamp(min=0)  # [B]
+            mortality_prob_pred_last = output["mortality_prob"][idx, last_idx]  # [B]
+            
+            loss_mortality_elementwise = F.binary_cross_entropy(mortality_prob_pred_last, y_mortality_true.float(), reduction='none')  
+                      
+            per_patient_mort_losses += loss_mortality_elementwise.cpu().tolist()
+            
+            mortality_prob_pred_last = mortality_prob_pred_last.cpu().numpy()  # [B]
+            mortality_true_last = y_mortality_true.cpu().numpy()                              # [B]
+            all_mort_preds.extend(mortality_prob_pred_last)
+            all_mort_trues.extend(mortality_true_last)
+
+
+            # 3. per-patient categories    
+            per_patient_cats += categories.cpu().tolist()
+
+    # --- 计算分类指标 ---
+    # 
+    try:
+        auroc = roc_auc_score(all_mort_trues, all_mort_preds)
+    except:
+        auroc = float('nan')
+    try:
+        auprc = average_precision_score(all_mort_trues, all_mort_preds)
+    except:
+        auprc = float('nan')
+        
+    # 以0.5为阈值
+    
+    precisions, recalls, thresholds = precision_recall_curve(all_mort_trues, all_mort_preds)
+    f1s = 2 * (precisions * recalls) / (precisions + recalls + 1e-8)
+    best_idx = np.argmax(f1s)
+    best_thresh = thresholds[best_idx]
+    print("Best threshold:", best_thresh, "→ F1:", f1s[best_idx]) 
+       
+    mort_preds_binary = [1 if p >= best_thresh else 0 for p in all_mort_preds]
+    precision = precision_score(all_mort_trues, mort_preds_binary, zero_division=0)
+    recall    = recall_score(all_mort_trues, mort_preds_binary, zero_division=0)
+    f1        = f1_score(all_mort_trues, mort_preds_binary, zero_division=0)
+    
+    # Specificity = TN / (TN + FP)
+    tn = sum(1 for t, p in zip(all_mort_trues, mort_preds_binary) if t == 0 and p == 0)
+    fp = sum(1 for t, p in zip(all_mort_trues, mort_preds_binary) if t == 0 and p == 1)
+    specificity = tn / (tn + fp) if (tn + fp) > 0 else float('nan')
+    # 输出结果
+    print("Total test samples:", len(all_mort_trues))
+    print("Number of actual deaths:", sum(all_mort_trues))
+    print("Predictions range: min=", min(all_mort_preds), " max=", max(all_mort_preds))
+    print("Mean predicted death probability:", np.mean(all_mort_preds))      
+    
+    print(f"Test Mortality - AUROC: {auroc:.4f}, AUPRC: {auprc:.4f}, Precision: {precision:.4f}, Recall: {recall:.4f},pecificity: {specificity:.4f}, F1: {f1:.4f}")
+
+    # 按类别统计loss
+    hist_cat = {}
+    losses_t = torch.tensor(per_patient_mort_losses)
+    cats_t = torch.tensor(per_patient_cats)
+    for i in range(2):
+        sel = cats_t == i
+        if sel.any():
+            group = losses_t[sel]
+            hist_cat[i] = (group.mean().item(), int(sel.sum().item()))
+
+    # 返回主要指标
+    return {
+        "auroc": auroc,
+        "auprc": auprc,
+        "precision": precision,
+        "recall": recall,
+        "specificity": specificity,
+        "f1": f1,
+        "per_patient_cat_loss": hist_cat,
+    }

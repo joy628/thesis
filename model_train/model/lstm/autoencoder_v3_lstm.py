@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 import sys
 
 class Encoder(nn.Module):
-    def __init__(self, input_dim, latent_dim, hidden_dim=128, num_layers=1):
+    def __init__(self, input_dim, latent_dim, hidden_dim=512, num_layers=1):
         super().__init__()
         self.lstm = nn.LSTM(input_dim, hidden_dim, num_layers=num_layers, batch_first=True)
         self.mu_proj = nn.Linear(hidden_dim, latent_dim)
@@ -25,7 +25,7 @@ class Encoder(nn.Module):
         return z_dist
 
 class Decoder(nn.Module):
-    def __init__(self, latent_dim, output_dim, hidden_dim=128, num_layers=1):
+    def __init__(self, latent_dim, output_dim, hidden_dim=512, num_layers=1):
         super().__init__()
         self.lstm = nn.LSTM(latent_dim, hidden_dim, num_layers=num_layers, batch_first=True)
         self.output_mu = nn.Linear(hidden_dim, output_dim)

@@ -256,7 +256,7 @@ def train_som(  model,  train_loader,  device,  max_epochs: int, save_dir: str,p
 
 def train_joint(model, train_loader, val_loader, train_loader_for_p, device, optimizer,
                 start_epoch: int, epochs: int, save_dir: str, kl_warmup_epochs: int = 10,
-                theta=1, gamma=50, kappa=1, beta=10, eta=1,
+                theta=1, gamma=50, beta=10, kappa=1, 
                 patience: int = 20):
 
     for param in model.parameters():

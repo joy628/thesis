@@ -280,7 +280,7 @@ def compute_trajectories_by_id_or_category(
         pids_to_find = set(str(pid) for pid in target_patient_ids)
         print(f"--- Searching for specified patient IDs: {list(pids_to_find)} ---")
     else:
-        # 模式2: 按类别搜索 
+        # 模式2: 按类别搜索 (你原来的逻辑)
         pids_to_find = set() # 用来存放已找到的ID，避免重复
         needed_by_cat = target_categories.copy()
         print(f"--- Searching for patients from categories: {needed_by_cat} ---")

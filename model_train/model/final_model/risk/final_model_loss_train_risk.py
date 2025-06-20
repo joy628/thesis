@@ -13,7 +13,9 @@ import copy
 from torch_geometric.data import Batch
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
-bce_loss_fn = nn.BCELoss(reduction='none')
+from sklearn.metrics import roc_auc_score, average_precision_score, precision_score, recall_score, f1_score, mean_squared_error
+
+
 
 def unfreeze(module):
     for p in module.parameters():
@@ -64,7 +66,7 @@ class EarlyStopping:
 
 def train_patient_outcome_model(model, 
             train_loader, val_loader, train_loader_for_p, device, optimizer,  epochs: int, save_dir: str, 
-            theta=1, gamma=50, kappa=1, beta=10, eta=1,
+            gamma=100, beta=10,kappa=1, theta=1,
             patience: int = 20 ):
 
     for param in model.parameters():
@@ -97,7 +99,7 @@ def train_patient_outcome_model(model,
         model.eval()
         all_q_list_for_p_epoch = [] # 每个有效时间步对som节点的q值。 soft assignment
         with torch.no_grad():
-            for _,flat_data,ts_data, graph_data,_, ts_lengths, cat, _,_ in tqdm(train_loader_for_p, desc=f"[Joint E{ep+1}] Calc Global P", leave=False):
+            for _,flat_data,ts_data, graph_data,_, ts_lengths, _,_,_ in tqdm(train_loader_for_p, desc=f"[Joint E{ep+1}] Calc Global P", leave=False):
                 flat_data, ts_data, ts_lengths = flat_data.to(device), ts_data.to(device), ts_lengths.to(device)
                 graph_data = graph_data.to(device)
                 
@@ -118,7 +120,7 @@ def train_patient_outcome_model(model,
         model.train()
         current_epoch_losses = {key: 0.0 for key in history if 'train_' in key}
         
-        for _,flat_data,ts_data, graph_data ,risk, ts_lengths,categories, mortality, original_indices in train_loader:
+        for _,flat_data,ts_data, graph_data ,risk, ts_lengths,_, mortality, original_indices in train_loader:
             
             flat_data, ts_data, ts_lengths = flat_data.to(device), ts_data.to(device), ts_lengths.to(device)
             graph_data = graph_data.to(device)
@@ -163,29 +165,34 @@ def train_patient_outcome_model(model,
             
             loss_s_som = model.compute_loss_s_som(q_soft_flat_valid, q_soft_flat_ng_valid)
              
-            # === 1.som smoothness loss ===
+            # === som smoothness loss ===
             z_e_sample_seq = output["z_e_seq"]
             bmu_indices_flat = output["aux_info"]["bmu_indices_flat"] # shape: (B*T_max,)
             loss_smooth = model.compute_loss_smoothness(
               z_e_sample_seq, bmu_indices_flat, model.alpha_som_q, mask_seq)
             
-            ## ===2. prediction loss
+            ## ===1. prediction loss MSE loss
             risk_scores_pred = output["risk_scores"] # (B, T)
             mask_seq_risk_bool, _ = model.generate_mask(ts_data.size(1), ts_lengths)
             mask_seq_risk = mask_seq_risk_bool.float()
-            loss_risk_elementwise = bce_loss_fn(risk_scores_pred, y_risk_true) # (B, T)
+            ## mse ##
+            loss_risk_elementwise =  F.mse_loss(risk_scores_pred, y_risk_true, reduction='none') # (B, T)
             loss_risk = (loss_risk_elementwise * mask_seq_risk).sum() / mask_seq_risk.sum().clamp(min=1) 
+            
 
 
-            total_loss = theta * loss_risk + gamma * loss_cah + beta * loss_s_som + kappa * loss_smooth 
+            total_loss =  gamma * loss_cah + beta * loss_s_som + kappa * loss_smooth + theta * loss_risk
+            
+            
             total_loss.backward()
             optimizer.step()
 
             current_epoch_losses['train_loss'] += total_loss.item()
-            current_epoch_losses['train_risk'] += loss_risk.item()
+            
             current_epoch_losses['train_cah'] += loss_cah.item()
             current_epoch_losses['train_s_som'] += loss_s_som.item()
             current_epoch_losses['train_smooth'] += loss_smooth.item()
+            current_epoch_losses['train_risk'] += loss_risk.item()
 
         for key in current_epoch_losses:
             history[key].append(current_epoch_losses[key] / len(train_loader))
@@ -199,51 +206,46 @@ def train_patient_outcome_model(model,
                 
                 flat_data, ts_data, ts_lengths = flat_data.to(device), ts_data.to(device), ts_lengths.to(device)
                 graph_data = graph_data.to(device)
-                y_risk_true =risk.to(device)
-                                
+                categories = categories.to(device)
+                
+                y_risk_true, y_mortality_true =risk.to(device),mortality.to(device)
+                
+                
                 output_val = model(flat_data, graph_data, ts_data, ts_lengths)
                 
-                # === som loss                
-                mask_seq_risk_bool, _ = model.generate_mask(ts_data.size(1), ts_lengths)
-                mask_seq_risk = mask_seq_risk_bool.float()
+                # === som loss 
                 
-                
-                loss_smooth_val = model.compute_loss_smoothness(output_val["z_e_seq"], output_val["aux_info"]["bmu_indices_flat"], model.alpha_som_q,mask_seq_risk)                
-                
-                # === 2. prediction loss
+                mask_seq_bool, _ = model.generate_mask(ts_data.size(1), ts_lengths)
+                mask_seq = mask_seq_bool.float()
+
+
+                # === 1. prediction loss
                 risk_scores_pred = output_val["risk_scores"] # (B, T)
                 
-                loss_risk_elementwise = bce_loss_fn(risk_scores_pred, y_risk_true) # (B, T)
-                loss_risk = (loss_risk_elementwise * mask_seq_risk).sum() / mask_seq_risk.sum().clamp(min=1) 
+                loss_risk_elementwise_val = F.mse_loss(risk_scores_pred, y_risk_true, reduction='none')
+                
+                loss_risk_val = (loss_risk_elementwise_val * mask_seq).sum() / mask_seq.sum().clamp(min=1)
                 # per risk
-                per_risk = (loss_risk_elementwise * mask_seq_risk).sum(dim=1) / mask_seq_risk.sum(dim=1).clamp(min=1)
-                 
-                total_epoch_loss_val += (loss_risk +loss_smooth_val).item()
-                per_patient_losses += (per_risk).cpu().tolist()
-                per_patient_cats   += categories.cpu().tolist()
-        
-        ## print val loss
-        if (ep + 1) % 10 == 0:
-            print(f"[Joint] Epoch {ep + 1}/{epochs} - "
-                f"Train Loss: {current_epoch_losses['train_loss'] / len(train_loader):.4f}, "
-                f"Risk Loss: {current_epoch_losses['train_risk'] / len(train_loader):.4f}, "
-                f"Val Loss: {total_epoch_loss_val / len(val_loader):.4f}") 
-                   
+                per_risk = (loss_risk_elementwise_val * mask_seq).sum(dim=1) / mask_seq.sum(dim=1).clamp(min=1)
+                
+                total_epoch_loss_val += (loss_risk_val).item()
+
+
 
         avg_val_loss = total_epoch_loss_val / len(val_loader)
         history['val_loss'].append(avg_val_loss)
         
-        hist_cat = {}
-        losses_t = torch.tensor(per_patient_losses)
-        cats_t   = torch.tensor(per_patient_cats)
-        for i in range(4):
-           sel = cats_t == i
-           if sel.any():
-                group = losses_t[sel]
-                hist_cat[i] = (group.mean().item(), int(sel.sum().item()))
+        # hist_cat = {}
+        # losses_t = torch.tensor(per_patient_losses)
+        # cats_t   = torch.tensor(per_patient_cats)
+        # for i in range(4):
+        #    sel = cats_t == i
+        #    if sel.any():
+        #         group = losses_t[sel]
+        #         hist_cat[i] = (group.mean().item(), int(sel.sum().item()))
                 
-        history['cat'].append(hist_cat)
-        scheduler.step(avg_val_loss)
+        # history['cat'].append(hist_cat)
+        # scheduler.step(avg_val_loss)
 
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
@@ -271,222 +273,82 @@ def train_patient_outcome_model(model,
             
         
 
+#===== evaluation function ====
 
-# def evaluate_model_on_test_set(model, test_loader,  device):
-#     model.eval()
-#     all_losses = []
-#     all_categories = []
-#     test_loss_total = 0.0
+from sklearn.metrics import mean_squared_error, r2_score, cohen_kappa_score
 
-#     with torch.no_grad():
-#         for batch in tqdm(test_loader, desc="[Test] Evaluating"):
-#             _, flat_data, ts_data, graph_data,risk_data, lengths, risk_category, mortality_labels = batch
-#             flat_data = flat_data.to(device)
-#             ts_data = ts_data.to(device)
-#             graph_data = graph_data.to(device)
-#             risk_data = risk_data.to(device)
-#             lengths = lengths.to(device)
-#             risk_category = risk_category.to(device)
-#             mortality_labels = mortality_labels.to(device)
-
-#             pred, _, _, _, mortality_prob,_, _  = model(flat_data, graph_data, ts_data, lengths)
-
-#             loss, _, batch_losses = compute_risk_loss(pred, risk_data, lengths, risk_category,mortality_prob,mortality_labels)
-
-#             test_loss_total += loss.item()
-#             all_losses.extend(batch_losses.cpu().tolist())
-#             all_categories.extend(risk_category.cpu().tolist())
-
-#     # === Category-wise loss summary ===
-#     category_results = {}
-#     for i in range(4):
-#         cls_losses = [l for l, c in zip(all_losses, all_categories) if c == i]
-#         category_results[i] = {
-#             "avg_loss": float(np.mean(cls_losses)) if cls_losses else float('nan'),
-#             "count": len(cls_losses)
-#         }
-
-#     avg_test_loss = test_loss_total / len(test_loader)
-
-#     print("\n[Test] Evaluation Summary:")
-#     print(f"  Overall Test Loss: {avg_test_loss:.4f}")
-#     for i in range(4):
-#         res = category_results[i]
-#         print(f"  Risk Category {i}: Mean Loss = {res['avg_loss']:.4f}, Count = {res['count']}")
-
-
-#     return avg_test_loss, category_results
-
-
-
-# === Training Plot  ===
-def plot_training_history(history):
-    epochs = range(1, len(history['train_loss']) + 1)
-    plt.figure(figsize=(10, 5))
-    plt.plot(epochs,history['train_loss'], label='Train Loss')
-    plt.plot(epochs,history['val_loss'], label='Validation Loss')
-    plt.xlabel('Epoch')
-    plt.ylabel('Loss')
-    plt.title('Train/Validation Loss')
-    plt.legend()
-    plt.grid(True)
-    plt.show()
-
-    plt.figure(figsize=(10, 5))
-    for cat in range(4):
-        losses = []
-        for ep_dict in history['cat']:
-             losses.append(ep_dict.get(cat, (float('nan'), 0))[0])
-        plt.plot(epochs, losses, marker='o', label=f'Category {cat}')
-    plt.xlabel('Epoch')
-    plt.ylabel('Category Loss')
-    plt.title('Per-Category Loss')
-    plt.legend()
-    plt.grid(True)
-    plt.show()
-
-
-def plot_patient_risk_score(model, dataset, patient_index, device):
-    """
-    绘制单个患者的风险分数轨迹: predict vs. true
-    """
+def test_patient_outcome_model(model, test_loader, device):
     model.eval()
-    RISK_LABELS = ["Risk-Free", "Low Risk", "High Risk", "Death"]
+    all_risk_preds, all_risk_trues = [], []
 
-    if isinstance(dataset, torch.utils.data.DataLoader):
-        dataset = dataset.dataset
-
-    pid, flat, ts, graph, risk, cat, mort, idx = dataset[patient_index]
-
-    flat_batch = flat.unsqueeze(0).to(device)    # [1, D_flat]
-    ts_batch   = ts.unsqueeze(0).to(device)      # [1, T, D_ts]
-    graph_batch= Batch.from_data_list([graph]).to(device)
-    cat_batch  = cat.unsqueeze(0).to(device)      # [1]
-    lengths    = torch.tensor([ts.size(0)], dtype=torch.long, device=device)  # [1]
+    # record per‐patient mean predictions and true categories, for κ
+    per_patient_mean_risk = []
+    per_patient_cats = []
 
     with torch.no_grad():
-        out = model(flat_batch, graph_batch, ts_batch, cat_batch, lengths)
-        pred = out['risk_scores'][0, :lengths.item()].cpu().numpy()
-        true = risk[:lengths.item()].numpy()
+        for _, flat_data, ts_data, graph_data, risk, ts_lengths, categories, _, _ in test_loader:
+            flat_data, ts_data, ts_lengths = flat_data.to(device), ts_data.to(device), ts_lengths.to(device)
+            graph_data = graph_data.to(device)
 
-    label = RISK_LABELS[cat.item()]
-    plt.figure(figsize=(10, 4))
-    plt.plot(pred, label="Predicted Risk", linestyle=':')
-    plt.plot(true, label="True Risk",   linestyle='--', alpha=0.7)
-    plt.title(f"Risk Score Trajectory - Patient {pid} ({label})")
-    plt.xlabel("Time Step")
-    plt.ylabel("Risk Score")
-    plt.ylim(0, 1.05)
-    plt.grid(True)
-    plt.legend()
-    plt.tight_layout()
-    plt.show()
+            # forward
+            output = model(flat_data, graph_data, ts_data, ts_lengths)
+            mask_seq, _ = model.generate_mask(ts_data.size(1), ts_lengths)
+            mask_float = mask_seq.float()  # [B, T]
 
+            # --- collect raw preds and truths for RMSE/R² ---
+            risk_pred = output["risk_scores"]        # [B, T]
+            risk_true = risk.to(device)             # [B, T]
 
-## plot heatmap
-def compute_som_activation_heatmap(model, loader, device, som_dim):
+            # flatten valid entries
+            mask_flat = mask_float.view(-1).bool()
+            preds_flat = risk_pred.view(-1)[mask_flat].cpu().numpy()
+            trues_flat = risk_true.view(-1)[mask_flat].cpu().numpy()
 
-    model.eval()
-    H, W = som_dim
-    N = H * W
-    counts = torch.zeros(N, dtype=torch.int32)
+            all_risk_preds.extend(preds_flat)
+            all_risk_trues.extend(trues_flat)
 
-    with torch.no_grad():
-        for batch in loader:
-            patient_ids, flat_x, ts_x, graph_data, risk, lengths, cat,_, _ = batch
-            flat_x   = flat_x.to(device)
-            ts_x     = ts_x.to(device)
-            graph_data.x = graph_data.x.to(device)
-            graph_data.edge_index = graph_data.edge_index.to(device)
-            graph_data.batch = graph_data.batch.to(device)
-            lengths  = lengths.to(device)
-            cat      = cat.to(device)
+            # --- per‐patient mean risk & category for κ ---
+            sum_pred = (risk_pred * mask_float).sum(dim=1)          # [B]
+            count = mask_float.sum(dim=1).clamp(min=1)              # [B]
+            mean_pred = (sum_pred / count).cpu().numpy()           # [B]
+            per_patient_mean_risk.extend(mean_pred.tolist())
 
-            out = model(flat_x, graph_data, ts_x, cat, lengths)
-            bmu_flat = out["aux_info"]["bmu_indices_flat"]    # (B*T,)
-            B, T = ts_x.shape[0], ts_x.shape[1]
-            _, mask_flat = model.generate_mask(T, lengths)    # (B*T,)
-            valid = bmu_flat[mask_flat]                       # (n_valid,)
-            counts += torch.bincount(valid, minlength=N).cpu()
+            per_patient_cats.extend(categories.cpu().tolist())
 
-    return counts.view(H, W).numpy()
+    # --- regression metrics ---
+    mse = mean_squared_error(all_risk_trues, all_risk_preds)
+    rmse = mse**0.5
+    r2   = r2_score(all_risk_trues, all_risk_preds)
 
+    print(f"Test Risk    → RMSE: {rmse:.4f}, R²: {r2:.4f}")
 
-def plot_som_activation_heatmap(heatmap, som_dim, cmap="YlGnBu"):
-    H, W = som_dim
-    plt.figure(figsize=(W*0.6, H*0.6))
-    sns.heatmap(
-        heatmap,
-        cmap=cmap,
-        annot=False,
-        fmt="d",
-        square=True,
-        cbar_kws={"label": "Activation Count"}
-    )
-    plt.title("Overall SOM Activation")
-    plt.xlabel("SOM Width")
-    plt.ylabel("SOM Height")
-    plt.gca().invert_yaxis()
-    plt.tight_layout()
-    plt.show()
+    # --- Cohen's κ on discrete categories (requires mapping preds → categories) ---
+    # Here we assume categories ∈ {0,1,2,3}.  We discretize the mean risk prediction
+    # to the nearest integer in [0,3].
+    import numpy as np
+    true_cats = np.array(per_patient_cats)
+    # scale mean_risk from [0,1] to [0,3], then round and clip
+    pred_cats = np.clip(np.round(np.array(per_patient_mean_risk) * 3), 0, 3).astype(int)
+    kappa     = cohen_kappa_score(true_cats, pred_cats)
 
+    print(f"Test Risk κ→ Cohen's κ: {kappa:.4f}")
 
-def compute_som_avg_risk(model, loader, device, som_dim):
-    """
-    统计每个 SOM node 上的平均 risk（dataloader 返回的 risk）
-    H×W numpy 矩阵，未激活节点为 NaN
-    """
-    model.eval()
-    H, W = som_dim
-    N = H * W
-    sum_risk = torch.zeros(N, dtype=torch.float32)
-    cnts     = torch.zeros(N, dtype=torch.int32)
+    # per‐category loss summary (optional)
+    hist_cat = {}
+    losses_t = torch.tensor([
+        (p - t)**2 for p, t in zip(per_patient_mean_risk, per_patient_mean_risk)  # here just placeholder
+    ])  # replace with your per‐patient loss if needed
+    cats_t   = torch.tensor(per_patient_cats)
+    for i in range(4):
+        sel = cats_t == i
+        if sel.any():
+            group = losses_t[sel]
+            hist_cat[i] = (group.mean().item(), int(sel.sum().item()))
 
-    with torch.no_grad():
-        for batch in loader:
-            patient_ids, flat_x, ts_x, graph_data, risk, lengths, cat,_, _ = batch
+    return {
+        "rmse": rmse,
+        "r2": r2,
+        "kappa": kappa,
+        "per_patient_cat_loss": hist_cat,
+    }
 
-            flat_x   = flat_x.to(device)
-            ts_x     = ts_x.to(device)
-            lengths  = lengths.to(device)
-            cat      = cat.to(device)
-            risk     = risk.to(device).float()
-            graph_data.x          = graph_data.x.to(device)
-            graph_data.edge_index = graph_data.edge_index.to(device)
-            graph_data.batch      = graph_data.batch.to(device)
-
-            # 前向
-            out = model(flat_x, graph_data, ts_x, cat, lengths)
-            bmu = out["aux_info"]["bmu_indices_flat"]  # (B*T,)
-            B, T = ts_x.shape[:2]
-
-            _, mask = model.generate_mask(T, lengths)  # (B*T,)
-            valid_bmu = bmu[mask]  # (n_valid,)
-
-            assert valid_bmu.min().item() >= 0 and valid_bmu.max().item() < N
-
-            # expand risk to each timestep
-            risk_seq = risk.reshape(-1)[mask]  # (n_valid,)
-            sum_risk.index_add_(0, valid_bmu.cpu(), risk_seq.cpu())
-            cnts    .index_add_(0, valid_bmu.cpu(), torch.ones_like(risk_seq.cpu(), dtype=torch.int32))
-
-    avg = sum_risk.numpy() / np.maximum(cnts.numpy(), 1)
-    avg[cnts.numpy() == 0] = np.nan
-    return avg.reshape(H, W)
-
-def plot_som_avg_risk(heatmap, som_dim, cmap="YlGnBu"):
-    H, W = som_dim
-    plt.figure(figsize=(W*0.6, H*0.6))
-    sns.heatmap(
-        heatmap,
-        cmap=cmap,
-        annot=True, fmt=".2f",
-        square=True,
-        cbar_kws={"label": "Avg Risk"},
-        linewidths=.5, linecolor="gray"
-    )
-    plt.title("SOM Node Avg Risk")
-    plt.xlabel("SOM Width"); plt.ylabel("SOM Height")
-    plt.gca().invert_yaxis()
-    plt.tight_layout()
-    plt.show()

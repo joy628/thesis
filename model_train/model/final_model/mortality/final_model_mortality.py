@@ -9,20 +9,29 @@ from torch.distributions import Normal, kl_divergence, Independent
 
 
 # === Flat Encoder ===
-class FlatFeatureEncoder(nn.Module): ## hidden dim 减小
-    def __init__(self, input_dim, hidden_dim):
+class FlatFeatureEncoder(nn.Module):
+    def __init__(self, input_dim, hidden_dim=32, num_layers=2, dropout_rate=0.2):
         super().__init__()
-        self.fc = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
-            nn.ReLU()
-        )
+        layers = []
+        current_dim = input_dim
+        for i in range(num_layers - 1):
+            layers.append(nn.Linear(current_dim, hidden_dim))
+            layers.append(nn.BatchNorm1d(hidden_dim))
+            layers.append(nn.ReLU(inplace=True))
+            layers.append(nn.Dropout(dropout_rate))
+            current_dim = hidden_dim
+        
+        layers.append(nn.Linear(current_dim, hidden_dim))
+        layers.append(nn.ReLU(inplace=True)) # Final activation
+
+        self.fc = nn.Sequential(*layers)
 
     def forward(self, x):
         return self.fc(x)
 
 # === Graph Encoder ===
 class GraphEncoder(nn.Module):
-    def __init__(self, input_dim, hidden_dim):
+    def __init__(self, input_dim, hidden_dim=32):
         super().__init__()
         self.gcn1 = GCNConv(input_dim, hidden_dim)
         self.bn1 = BatchNorm(hidden_dim)
@@ -44,7 +53,7 @@ class TimeSeriesEncoder(nn.Module):
     def forward(self, x_input_seq,length=None): # x_input_seq: (B, T_max, D_original_features)
                        
         # 1. Get latent distribution from pretrained VAE Encoder
-        z_dist_flat = self.pretrained_encoder(x_input_seq,length) 
+        z_dist_flat= self.pretrained_encoder(x_input_seq,length) 
         
         # 2. Get point estimate (mean) for the latent representation
         z_e_sample_flat = z_dist_flat.mean 
@@ -105,49 +114,83 @@ class FeatureAttentionFusion(nn.Module):
         out = torch.matmul(attn, v)  # [B, N, D]
         out = out.mean(dim=1)  # Aggregate
         return self.out(out)  # [B, D]
-  
-    
+
+# === Mortality  ===
 class MortalityPredictor(nn.Module):
-    def __init__(self, fused_dim, ts_dim, hidden_dim=512, dropout=0.3):
+    def __init__(self, fused_dim, ts_dim, lstm_hidden=512,lstm_layers=2, dropout=0.2):
         super().__init__()
+        self.fused_dim = fused_dim
+        self.ts_dim = ts_dim
         
-        self.input_dim = fused_dim + ts_dim
-        self.fc = nn.Sequential(
-            nn.Linear(self.input_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim),
-            nn.ReLU(inplace=True),
-            nn.Dropout(dropout),
-            
-            nn.Linear(hidden_dim, hidden_dim // 2),
-            nn.LayerNorm(hidden_dim // 2),
-            nn.ReLU(inplace=True),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim // 2, 1) 
-        )
+        self.lstm = nn.LSTM(self.ts_dim, lstm_hidden, num_layers=lstm_layers,batch_first=True,dropout=dropout)
+        self.drop = nn.Dropout(dropout)
+                                                                                            
+        self.fc_ts = nn.Sequential(
+                nn.Linear(lstm_hidden, lstm_hidden // 2),
+                nn.ReLU(),
+                nn.Dropout(dropout),            
+                nn.Linear(lstm_hidden // 2, 64) )
+        self.fc_fused = nn.Sequential(
+                nn.Linear(fused_dim, lstm_hidden // 2),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+                nn.Linear(lstm_hidden // 2, 64) )
         
-        for m in self.fc:
+        self.fc_combine = nn.Sequential(
+                nn.Linear(128, lstm_hidden // 2),
+                nn.ReLU(),
+                nn.Dropout(dropout),            
+                nn.Linear(lstm_hidden // 2, 1) )
+
+        for m in self.fc_ts:
             if isinstance(m, nn.Linear):
                 nn.init.kaiming_uniform_(m.weight, a=0.2)
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
-            
-
-    def forward(self, fused,ts):
-        fused_exp = fused.unsqueeze(1).expand(-1, ts.size(1), -1)  # [B, T, fused_dim]
-        x = torch.cat([fused_exp, ts], dim=2)                      # [B, T, fused_dim + ts_dim]      
-        logits = self.fc(x)           # [B,1]
-        prob = torch.sigmoid(logits)   # [B,1]
+        for m in self.fc_fused:
+            if isinstance(m, nn.Linear):
+                nn.init.kaiming_uniform_(m.weight, a=0.2)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+        for m in self.fc_combine:
+            if isinstance(m, nn.Linear):
+                nn.init.kaiming_uniform_(m.weight, a=0.2)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
         
-        return prob.squeeze(-1)        # [B]
 
+    def forward(self, fused, ts,lengths):
+        """
+        fused: [B, fused_dim]
+        ts: [B, T, ts_dim]
+        lengths: [B], actual lengths of each sequence in the batch
+        """
+
+        # 1) lstm on ts
+        packed_output  = pack_padded_sequence(ts, lengths.cpu(), batch_first=True, enforce_sorted=False)  # Pack for LSTM
+        packed_output, _ = self.lstm(packed_output)                                         # [B, T, hidden_dim]
+        output,_ = pad_packed_sequence(packed_output, batch_first=True)                    # Unpack LSTM output
+        ts_out = self.fc_ts(output)                                                       # [B, T, 64]
+        ts_out = self.drop(ts_out)                                                      # [B, T, 64]
+        # 2) fc on fused 
+        fused_out = self.fc_fused(fused)                                                   # [B, 64]
+        fused_out = self.drop(fused_out)                                                   # [B, 64]
+        # 3) combine
+        fused_out_exp = fused_out.unsqueeze(1).expand(-1, ts.size(1), -1)  # [B, T, 64]
+        combine_exp = torch.cat([fused_out_exp, ts_out], dim=2)                  # [B, T, 128]
+        combine_out = self.fc_combine(combine_exp)                                # [B, T, 1]
+        return torch.sigmoid(combine_out).squeeze(-1)  # [B, T], mortality probability for each timestep
+
+       
+    
 # === Full Model ===
 class PatientOutcomeModel(nn.Module):
     def __init__(self, flat_input_dim, graph_input_dim, hidden_dim,som=None, pretrained_encoder=None):
         super().__init__()
-        
-        self.hidden_dim = hidden_dim 
-        self.flat_encoder = FlatFeatureEncoder(flat_input_dim, hidden_dim)
-        self.graph_encoder = GraphEncoder(graph_input_dim, hidden_dim)
+        self.hidden_dim = hidden_dim
+        self.static_hidden_dim = hidden_dim // 4
+        self.flat_encoder = FlatFeatureEncoder(flat_input_dim, self.static_hidden_dim)
+        self.graph_encoder = GraphEncoder(graph_input_dim,self.static_hidden_dim)
         
         self.ts_encoder = TimeSeriesEncoder(pretrained_encoder)
         self.som_layer = SOMLayer(som)  
@@ -157,17 +200,14 @@ class PatientOutcomeModel(nn.Module):
            self.alpha_som_q = som.alpha_som_q
         else:
             self.alpha_som_q = 5.0
-
-        self.som_proj = nn.Linear(2 * hidden_dim, 128) 
         
-        self.fusion = FeatureAttentionFusion(hidden_dim, hidden_dim)
-        
-        self.mortality_predictor = MortalityPredictor(hidden_dim,hidden_dim)
-            
+        self.fusion = FeatureAttentionFusion(self.static_hidden_dim, self.static_hidden_dim)
 
-    def forward(self, flat_data, graph_data, ts_data,length=None):
+        self.mortality_predictor = MortalityPredictor(self.static_hidden_dim, self.hidden_dim)
+
+    def forward(self, flat_data, graph_data, ts_data, length=None):
         device = ts_data.device
-   
+
         # === Graph Embedding  ===
         x, edge_index, batch = graph_data.x.to(device), graph_data.edge_index.to(device), graph_data.batch.to(device)
         node_emb = self.graph_encoder(x, edge_index)    # [sum_nodes, D]
@@ -175,25 +215,22 @@ class PatientOutcomeModel(nn.Module):
         # Aggregate node features to get graph-level representation
         mask = graph_data.mask.to(device).unsqueeze(-1)        # [sum_nodes, 1]
         masked_emb = node_emb * mask  
-        graph_emb = scatter_mean(masked_emb, batch, dim=0)     # [B, D]
+        graph_emb = scatter_mean(masked_emb, batch, dim=0)     # [B, D=32]
 
         # === Flat Embedding ===
-        flat_emb = self.flat_encoder(flat_data)  # [B, D]
+        flat_emb = self.flat_encoder(flat_data)  # [B, D=32]
         
         # === Fuse flat + graph ===
-        fused_static = self.fusion([flat_emb, graph_emb])  # [B, D]
+        fused_static = self.fusion([flat_emb, graph_emb])  # [B, D=32]
 
         # === TS Embedding ===
-        ts_emb= self.ts_encoder(ts_data,length)  # [B, T, D]        
+        ts_emb= self.ts_encoder(ts_data,length)  # [B, T, D=128]        
             
-        #  === Mortality Prediction === #  
-        mortality_prob = self.mortality_predictor(fused_static,ts_emb)
-
+        #  === Mortality Prediction === 
+        mortality_prob = self.mortality_predictor(fused_static,ts_emb, length)  # [B, T]
+        
         
         # === som ======
-        # fused_exp = fused_static.unsqueeze(1).expand(-1, ts_emb.size(1), -1)  # [B, T, D]
-        # combine_exp = torch.cat([fused_exp, ts_emb], dim=2)                  # [B, T, 2D]
-        # proj_exp = self.som_proj(combine_exp)                                # [B, T, 128]
         aux_info = self.som_layer(ts_emb)  
         
         return {
@@ -299,29 +336,6 @@ class PatientOutcomeModel(nn.Module):
         loss_s_som = -torch.mean(torch.sum(loss_val, dim=1)) # Sum over nodes, then mean over samples. Negative for maximization.
         return loss_s_som
 
-    def compute_loss_prediction(self, pred_z_dist_flat, z_e_sample_seq, mask_flat_bool): # Renamed mask input
-            # pred_z_dist_flat: IndependentNormal, batch_shape=(B*T_max), event_shape=(latent_dim)
-            # z_e_sample_seq: (B, T_max, D_latent), true z sequence
-            # mask_flat_bool: (B*T_max), boolean mask for valid timesteps
-            
-            B, T, D_latent = z_e_sample_seq.shape
-
-            # Target is the next timestep's z_e
-            z_e_next_targets_seq = torch.cat([z_e_sample_seq[:, 1:, :], 
-                                            z_e_sample_seq[:, -1:, :]], dim=1) # Shape (B, T, D_latent)
-            z_e_next_targets_flat = z_e_next_targets_seq.reshape(B * T, D_latent) # Shape (B*T_max, D_latent)
-            
-            current_mask_flat = mask_flat_bool.float() if mask_flat_bool.dtype == torch.bool else mask_flat_bool
-
-            # log_p will have shape (B*T_max)
-            log_p = pred_z_dist_flat.log_prob(z_e_next_targets_flat.detach())
-            
-            # Sum log_p for valid timesteps and divide by the number of valid timesteps in the batch
-            masked_log_p_sum = torch.sum(log_p * current_mask_flat)
-            num_valid_timesteps_total = current_mask_flat.sum().clamp(min=1)
-            
-            loss = - (masked_log_p_sum / num_valid_timesteps_total)
-            return loss
 
     def compute_loss_smoothness(self, z_e_sample_seq, bmu_indices_flat, alpha_som_q, mask_seq): #
 

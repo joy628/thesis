@@ -9,7 +9,7 @@ sys.path.append('/home/mei/nas/docker/thesis/model_train/model')
 from  retnet.retnetModule.retnet import RetNet
 
 class RetNetEncoder(nn.Module):
-    def __init__(self, input_dim, latent_dim, hidden_dim=256, layers=1, ffn_size=256, heads=2):
+    def __init__(self, input_dim, latent_dim, hidden_dim=256, layers=1, ffn_size=512, heads=2):
         super().__init__()
         self.input_proj = nn.Linear(input_dim, hidden_dim)
         self.retnet = RetNet(layers=layers, hidden_dim=hidden_dim, ffn_size=ffn_size, heads=heads)
@@ -34,7 +34,7 @@ class RetNetEncoder(nn.Module):
     
     
 class RetNetDecoder(nn.Module):
-    def __init__(self, latent_dim, output_dim,hidden_dim=256, layers=2, ffn_size=256, heads=2):
+    def __init__(self, latent_dim, output_dim,hidden_dim=256, layers=1, ffn_size=512, heads=2):
         super().__init__()
         self.input_proj = nn.Linear(latent_dim , hidden_dim)
         self.retnet = RetNet(layers=layers, hidden_dim=hidden_dim, ffn_size=ffn_size, heads=heads)

@@ -13,7 +13,7 @@ from torch_geometric.data import Batch
 def plot_training_history(history):
     epochs = range(1, len(history['train_loss']) + 1)
     plt.figure(figsize=(10, 5))
-    plt.plot(epochs,history['train_risk_mortality'], label='Train Loss')
+    plt.plot(epochs,history['train_risk'], label='Train Loss')
     plt.plot(epochs,history['val_loss'], label='Validation Loss')
     plt.xlabel('Epoch')
     plt.ylabel('Loss')
@@ -396,7 +396,7 @@ def plot_trajectory_snapshots_custom_color(heatmap, trajectories, som_dim, snaps
         ax = axes[i]
         
         # a. 绘制背景热力图
-        sns.heatmap(heatmap, cmap=heatmap_cmap, annot=False, cbar=False, ax=ax, square=True)
+        sns.heatmap(heatmap, cmap=heatmap_cmap, annot=False, cbar=True, cbar_kws={"label": "Avg Risk of SOM node"}, ax=ax, square=True)
         ax.invert_yaxis()
         ax.set_title(f"t = {t}", fontsize=12)
         ax.set_xticks([])
@@ -438,7 +438,7 @@ def plot_trajectory_snapshots_custom_color(heatmap, trajectories, som_dim, snaps
 
     # --- 4. 添加图例和共享的颜色条 ---
     # 创建一个代理图例
-    legend_elements = [plt.Line2D([0], [0], color=color, lw=4, label=f'Category {cat}') 
+    legend_elements = [plt.Line2D([0], [0], color=color, lw=4, label=f'Category {cat}')
                        for cat, color in category_colors.items() if cat in [d['category'] for d in trajectories.values()]]
     fig.legend(handles=legend_elements, title="Patient Category", bbox_to_anchor=(0.98, 0.8), loc='center left')
 

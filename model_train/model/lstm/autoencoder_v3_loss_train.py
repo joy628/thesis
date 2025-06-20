@@ -77,16 +77,13 @@ def train_vae(model, train_loader, device, optimizer, start,epochs, save_dir, pa
     for ep in range(start,epochs):
         
         
-
         # kl_weight = cyclical_kl_weight(ep, cycle_length=kl_warmup_epochs)
         beta_value_for_kl = 0.001 # 
         if ep < kl_warmup_epochs:
             kl_weight = beta_value_for_kl * (ep / kl_warmup_epochs)
         else:
             kl_weight = beta_value_for_kl
-            
-              
-
+                         
            
         total_epoch_loss = 0.0
         total_epoch_recon_loss = 0.0
@@ -715,5 +712,129 @@ def visualize_recons(model, data_loader, num_patients, feature_indices, feature_
             if j == 0:
                 ax.set_ylabel(f"Patient {i+1} (L={L})")
             ax.legend(fontsize=6)
+    plt.tight_layout()
+    plt.show()
+    
+    
+from collections import defaultdict
+import numpy as np
+def compute_som_activation_by_category(model, loader, device, som_dim):
+    """
+    按照 loader 中返回的 cat 值分组统计 SOM 激活次数。
+    返回一个 dict:{cat_value: H*W numpy array}
+    """
+    model.eval()
+    H, W = som_dim
+    N = H*W
+    counts = defaultdict(lambda: torch.zeros(N, dtype=torch.int32))
+
+    with torch.no_grad():
+        for x, lengths, _, cat in loader:
+            x, lengths, cat = x.to(device), lengths.to(device), cat.to(device)
+            B, T, _ = x.shape
+
+            out = model(x, lengths, is_training=False)
+            bmu_flat = out["bmu_indices_flat"]                    # (B*T,)
+            _, mask = model.generate_mask(T, lengths)             # (B*T,)
+            valid_bmu = bmu_flat[mask]                            # (n_valid,)
+            cat_flat   = torch.repeat_interleave(cat, T)[mask]    # (n_valid,)
+
+            for c in cat_flat.unique().cpu().numpy():
+                sel = cat_flat == c
+                counts[int(c)] += torch.bincount(valid_bmu[sel], minlength=N).cpu()
+
+    # reshape to H×W
+    return {c: counts[c].view(H, W).numpy() for c in counts}
+
+def plot_som_usage_by_category(hm_dict, som_dim, cmap="viridis"):
+    """
+    hm_dict: {cat_value: H*W array}
+    """
+    cats = sorted(hm_dict.keys())
+    n = len(cats)
+    cols = min(n, 4)
+    rows = int(np.ceil(n/cols))
+
+    fig, axes = plt.subplots(
+        rows, cols,
+        figsize=(cols*4, rows*4),
+        sharex=True, sharey=True,
+        constrained_layout=True # 自动调整子图间距
+    )
+    axes = axes.flatten()
+
+    for ax, c in zip(axes, cats):
+        sns.heatmap(
+            hm_dict[c],
+            ax=ax,
+            cmap=cmap,
+            annot=True, fmt="d",
+            square=True,
+            cbar=False
+        )
+        ax.set_title(f"cat={c}")
+        ax.invert_yaxis()
+        ax.set_xticks([]); ax.set_yticks([])
+
+    # 最后一个子图加 colorbar
+    fig.colorbar(
+        axes[-1].collections[0],
+        ax=axes.tolist(),
+        label="Activation Count"
+    )
+    plt.show()
+
+
+def compute_som_avg_category(model, loader, device, som_dim):
+    """
+    对每次激活，累加对应的 cat 值，再除以激活次数，得到每个节点的平均类别。
+    返回 H*W numpy array,值域 [0, max(cat)]。
+    """
+    model.eval()
+    H, W = som_dim
+    N = H*W
+    sum_cat = torch.zeros(N, dtype=torch.float32)
+    cnts    = torch.zeros(N, dtype=torch.int32)
+
+    with torch.no_grad():
+        for x, lengths, _, cat in loader:
+            x, lengths, cat = x.to(device), lengths.to(device), cat.to(device)
+            B, T, _ = x.shape
+
+            out = model(x, lengths, is_training=False)
+            bmu_flat, = out["bmu_indices_flat"].unsqueeze(0),  # (B*T,)
+            _, mask = model.generate_mask(T, lengths)          # (B*T,)
+            valid_bmu = out["bmu_indices_flat"][mask]          # (n_valid,)
+            valid_cat = torch.repeat_interleave(cat, T)[mask]  # (n_valid,)
+
+            # 累加
+            sum_cat.index_add_(0, valid_bmu.cpu(), valid_cat.cpu().float())
+            cnts.index_add_(0, valid_bmu.cpu(), torch.ones_like(valid_cat.cpu(), dtype=torch.int32))
+
+    # 平均，未激活节点设为 NaN
+    avg_cat = sum_cat.numpy() / np.maximum(cnts.numpy(), 1)
+    avg_cat[cnts.numpy() == 0] = np.nan
+    return avg_cat.reshape(H, W)
+
+def plot_som_avg_category(heatmap, som_dim, cmap="YlGnBu"):
+    """
+    heatmap: H*W array of avg category (0,1,2,3)或 NaN
+    """
+    H, W = som_dim
+    plt.figure(figsize=(W*0.6, H*0.6))
+    sns.heatmap(
+        heatmap,
+        cmap=cmap,
+        annot=True,
+        fmt=".2f",
+        square=True,
+        cbar_kws={"label": "Avg Category"},
+        linewidths=.5,
+        linecolor="gray"
+    )
+    plt.title("SOM Node Avg Category")
+    plt.xlabel("SOM Width")
+    plt.ylabel("SOM Height")
+    plt.gca().invert_yaxis()
     plt.tight_layout()
     plt.show()

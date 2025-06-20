@@ -13,7 +13,7 @@ from torch_geometric.data import Batch
 def plot_training_history(history):
     epochs = range(1, len(history['train_loss']) + 1)
     plt.figure(figsize=(10, 5))
-    plt.plot(epochs,history['train_risk_mortality'], label='Train Loss')
+    plt.plot(epochs,history['train_mortality'], label='Train Loss')
     plt.plot(epochs,history['val_loss'], label='Validation Loss')
     plt.xlabel('Epoch')
     plt.ylabel('Loss')
@@ -35,13 +35,12 @@ def plot_training_history(history):
     # plt.grid(True)
     # plt.show()
 
-
-def plot_patient_risk_score(model, dataset, patient_index, device):
+def plot_patient_mortality_probability(model, dataset, patient_index, device):
     """
-    绘制单个患者的风险分数轨迹: predict vs. true
+    绘制单个患者的死亡概率轨迹: predict vs. true
     """
     model.eval()
-    RISK_LABELS = ["Risk-Free", "Low Risk", "High Risk", "Death"]
+    MORTALITY_LABELS = ["Alive", "Death"]
 
     if isinstance(dataset, torch.utils.data.DataLoader):
         dataset = dataset.dataset
@@ -51,21 +50,21 @@ def plot_patient_risk_score(model, dataset, patient_index, device):
     flat_batch = flat.unsqueeze(0).to(device)    # [1, D_flat]
     ts_batch   = ts.unsqueeze(0).to(device)      # [1, T, D_ts]
     graph_batch= Batch.from_data_list([graph]).to(device)
-    cat_batch  = cat.unsqueeze(0).to(device)      # [1]
+    mort_batch  = mort.unsqueeze(0).to(device)      # [1]
     lengths    = torch.tensor([ts.size(0)], dtype=torch.long, device=device)  # [1]
 
     with torch.no_grad():
         out = model(flat_batch, graph_batch, ts_batch, lengths)
-        pred = out['risk_scores'][0, :lengths.item()].cpu().numpy()
-        true = risk[:lengths.item()].numpy()
+        pred = out['mortality_prob'][0, :lengths.item()].cpu().numpy()
+        true = np.full_like(pred, fill_value=mort.item(), dtype=float)
 
-    label = RISK_LABELS[cat.item()]
+    label = MORTALITY_LABELS[mort.item()]
     plt.figure(figsize=(10, 4))
-    plt.plot(pred, label="Predicted Risk", linestyle=':')
-    plt.plot(true, label="True Risk",   linestyle='--', alpha=0.7)
-    plt.title(f"Risk Score Trajectory - Patient {pid} ({label})")
+    plt.plot(pred, label="Predicted Mortality", linestyle=':')
+    plt.plot(true, label="True Mortality",   linestyle='--', alpha=0.7)
+    plt.title(f"Mortality Probability Trajectory - Patient {pid} ({label})")
     plt.xlabel("Time Step")
-    plt.ylabel("Risk Score")
+    plt.ylabel("Mortality Probability")
     plt.ylim(0, 1.05)
     plt.grid(True)
     plt.legend()
@@ -120,62 +119,66 @@ def plot_som_activation_heatmap(heatmap, som_dim, cmap="YlGnBu"):
     plt.tight_layout()
     plt.show()
 
-
-def compute_som_avg_risk(model, loader, device, som_dim):
+def compute_som_avg_mortality_prob(model, loader, device, som_dim):
     """
-    统计每个 SOM node 上的平均 risk dataloader 返回的 risk
+    统计每个 SOM node 上的平均死亡概率（out['mortality_prob']）
     """
     model.eval()
     H, W = som_dim
     N = H * W
-    sum_risk = torch.zeros(N, dtype=torch.float32)
+    sum_prob = torch.zeros(N, dtype=torch.float32)
     cnts     = torch.zeros(N, dtype=torch.int32)
 
     with torch.no_grad():
         for batch in loader:
-            patient_ids, flat_x, ts_x, graph_data, risk, lengths, cat,_, _ = batch
+            
+            patient_ids, flat_x, ts_x, graph_data, risk, lengths, cat, mort, _ = batch
+            flat_x, ts_x, lengths = flat_x.to(device), ts_x.to(device), lengths.to(device)
+            graph_data = graph_data.to(device)
 
-            flat_x   = flat_x.to(device)
-            ts_x     = ts_x.to(device)
-            lengths  = lengths.to(device)
-            cat      = cat.to(device)
-            risk     = risk.to(device).float()
-            graph_data.x          = graph_data.x.to(device)
-            graph_data.edge_index = graph_data.edge_index.to(device)
-            graph_data.batch      = graph_data.batch.to(device)
+            
+            out = model(flat_x, graph_data, ts_x, lengths)
+            prob = out['mortality_prob']             # [B, T]
+            
+            # flatten probabilities and masks
+            B, T = prob.shape
+            prob_flat = prob.reshape(-1)             # [B*T]
+            _, mask = model.generate_mask(T, lengths)  # [B, T] → reshape 后 [B*T]
+            mask_flat = mask.reshape(-1)
+            
+            # bmu idx
+            bmu = out["aux_info"]["bmu_indices_flat"]  # [B*T]
+            valid_bmu = bmu[mask_flat]                 # 过滤出有效时刻对应的节点索引
+            
+            # 只取有效时刻的概率
+            prob_seq = prob_flat[mask_flat]            # [n_valid]
+            
+            # 累加
+            sum_prob.index_add_(0, valid_bmu.cpu(), prob_seq.cpu())
+            cnts    .index_add_(0, valid_bmu.cpu(), torch.ones_like(prob_seq.cpu(), dtype=torch.int32))
 
-            # 前向
-            out = model(flat_x, graph_data, ts_x,  lengths)
-            bmu = out["aux_info"]["bmu_indices_flat"]  # (B*T,)
-            B, T = ts_x.shape[:2]
-
-            _, mask = model.generate_mask(T, lengths)  # (B*T,)
-            valid_bmu = bmu[mask]  # (n_valid,)
-
-            assert valid_bmu.min().item() >= 0 and valid_bmu.max().item() < N
-
-            # expand risk to each timestep
-            risk_seq = risk.reshape(-1)[mask]  # (n_valid,)
-            sum_risk.index_add_(0, valid_bmu.cpu(), risk_seq.cpu())
-            cnts    .index_add_(0, valid_bmu.cpu(), torch.ones_like(risk_seq.cpu(), dtype=torch.int32))
-
-    avg = sum_risk.numpy() / np.maximum(cnts.numpy(), 1)
+    #  计算每个 SOM node 的平均死亡概率
+    avg = sum_prob.numpy() / np.maximum(cnts.numpy(), 1)
     avg[cnts.numpy() == 0] = np.nan
     return avg.reshape(H, W)
 
-def plot_som_avg_risk(heatmap, som_dim, cmap="YlGnBu"):
+
+def plot_som_avg_mortality_prob(heatmap, som_dim, cmap="YlGnBu"):
     H, W = som_dim
     plt.figure(figsize=(W*0.6, H*0.6))
     sns.heatmap(
         heatmap,
         cmap=cmap,
-        # linewidths=.5, linecolor="gray"
+        annot=True, fmt=".2f",
+        square=True,
+        cbar_kws={"label": "Avg Mortality Prob"},
     )
-    plt.title("SOM Node Avg Risk")
+    plt.title("SOM Node Avg Mortality Probability")
     plt.xlabel("SOM Width"); plt.ylabel("SOM Height")
-    plt.gca().invert_yaxis() #
+    plt.gca().invert_yaxis()
     plt.tight_layout()
     plt.show()
+
 
 
 
@@ -396,7 +399,7 @@ def plot_trajectory_snapshots_custom_color(heatmap, trajectories, som_dim, snaps
         ax = axes[i]
         
         # a. 绘制背景热力图
-        sns.heatmap(heatmap, cmap=heatmap_cmap, annot=False, cbar=False, ax=ax, square=True)
+        sns.heatmap(heatmap, cmap=heatmap_cmap, annot=False, cbar=True, cbar_kws={"label": "Avg mortality probability of SOM node"}, ax=ax, square=True)
         ax.invert_yaxis()
         ax.set_title(f"t = {t}", fontsize=12)
         ax.set_xticks([])
@@ -438,7 +441,7 @@ def plot_trajectory_snapshots_custom_color(heatmap, trajectories, som_dim, snaps
 
     # --- 4. 添加图例和共享的颜色条 ---
     # 创建一个代理图例
-    legend_elements = [plt.Line2D([0], [0], color=color, lw=4, label=f'Category {cat}') 
+    legend_elements = [plt.Line2D([0], [0], color=color, lw=4, label=f'Category {cat}')
                        for cat, color in category_colors.items() if cat in [d['category'] for d in trajectories.values()]]
     fig.legend(handles=legend_elements, title="Patient Category", bbox_to_anchor=(0.98, 0.8), loc='center left')
 
@@ -448,7 +451,7 @@ def plot_trajectory_snapshots_custom_color(heatmap, trajectories, som_dim, snaps
         sm = plt.cm.ScalarMappable(cmap=cmap_points, norm=norm)
         sm.set_array([])
         cbar = fig.colorbar(sm, cax=cbar_ax)
-        cbar.set_label('Timepoint Risk Score')
+        cbar.set_label('Timepoint Mortality Prediction')
 
     plt.tight_layout(rect=[0, 0, 0.9, 1])
     plt.show()

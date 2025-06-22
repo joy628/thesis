@@ -375,7 +375,7 @@ def plot_trajectory_snapshots_custom_color(heatmap, trajectories, som_dim, snaps
     # --- 1. 创建子图画布 ---
     # 画布的列数等于快照的数量
     num_snapshots = len(snapshot_times)
-    fig, axes = plt.subplots(1, num_snapshots, figsize=(W * num_snapshots * 0.35, H * 0.4))
+    fig, axes = plt.subplots(1, num_snapshots, figsize=(W * num_snapshots * 0.4, H * 0.4))
     if num_snapshots == 1:
         axes = [axes] # 保证axes总是一个可迭代对象
         
@@ -396,9 +396,9 @@ def plot_trajectory_snapshots_custom_color(heatmap, trajectories, som_dim, snaps
         ax = axes[i]
         
         # a. 绘制背景热力图
-        sns.heatmap(heatmap, cmap=heatmap_cmap, annot=False, cbar=True, cbar_kws={"label": "Avg Risk of SOM node"}, ax=ax, square=True)
+        sns.heatmap(heatmap, cmap=heatmap_cmap, annot=False, cbar=True, cbar_kws={"label": "Avg Risk Score of SOM node"}, ax=ax, square=True)
         ax.invert_yaxis()
-        ax.set_title(f"t = {t}", fontsize=12)
+        ax.set_title(f"t = {t}", fontsize=10)
         ax.set_xticks([])
         ax.set_yticks([])
 
@@ -435,20 +435,26 @@ def plot_trajectory_snapshots_custom_color(heatmap, trajectories, som_dim, snaps
                     markeredgecolor=line_color, markeredgewidth=2, zorder=4)
             ax.text(x_coords[0], y_coords[0], 'S', color='black', ha='center', va='center', 
                     fontweight='bold', fontsize=7, zorder=5)
+            
+            # 在最后一个点上标记终点 'E'
+            ax.plot(x_coords[-1], y_coords[-1], 'X', color=line_color, markersize=10, markeredgecolor='black', markeredgewidth=1, zorder=5)
+            ax.text(x_coords[-1], y_coords[-1], 'E', color='black', ha='center', va='center',fontweight='bold', fontsize=7, zorder=6)
 
     # --- 4. 添加图例和共享的颜色条 ---
     # 创建一个代理图例
     legend_elements = [plt.Line2D([0], [0], color=color, lw=4, label=f'Category {cat}')
                        for cat, color in category_colors.items() if cat in [d['category'] for d in trajectories.values()]]
-    fig.legend(handles=legend_elements, title="Patient Category", bbox_to_anchor=(0.98, 0.8), loc='center left')
+    start_proxy = plt.Line2D([0], [0],  marker='o', color='white', markeredgecolor='black', linestyle='None',  markersize=8, label='Start (S)')
+    end_proxy   = plt.Line2D([0], [0],  marker='X', color='white',markeredgecolor='black', linestyle='None', markersize=8, label='End (E)')
+    fig.legend(handles=legend_elements + [start_proxy, end_proxy], title="Patient Category", bbox_to_anchor=(0.98, 0.85), loc='center left')
 
     # 为风险散点创建一个共享的颜色条
     if norm:
-        cbar_ax = fig.add_axes([0.92, 0.15, 0.02, 0.6]) # [left, bottom, width, height]
+        cbar_ax = fig.add_axes([0.85, 0.05, 0.04, 0.82]) # [left, bottom, width, height]
         sm = plt.cm.ScalarMappable(cmap=cmap_points, norm=norm)
         sm.set_array([])
         cbar = fig.colorbar(sm, cax=cbar_ax)
         cbar.set_label('Timepoint Risk Score')
 
-    plt.tight_layout(rect=[0, 0, 0.9, 1])
+    plt.tight_layout(rect=[0, 0, 0.8, 1])
     plt.show()

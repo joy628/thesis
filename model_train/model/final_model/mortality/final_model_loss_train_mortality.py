@@ -297,7 +297,6 @@ def train_patient_outcome_model(model,
 from sklearn.metrics import precision_recall_curve
 
 
-
 def test_patient_outcome_model(model, test_loader, device):
     model.eval()
     

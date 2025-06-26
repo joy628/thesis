@@ -7,6 +7,7 @@ from matplotlib.collections import LineCollection
 from matplotlib.colors import Normalize
 from tqdm import tqdm
 from torch_geometric.data import Batch
+from matplotlib.colors import LogNorm
 
 
 
@@ -108,6 +109,7 @@ def plot_som_activation_heatmap(heatmap, som_dim, cmap="YlGnBu"):
     sns.heatmap(
         heatmap,
         cmap=cmap,
+        norm=LogNorm(vmin=max(heatmap.min(), 1e-3), vmax=heatmap.max()),
         annot=False,
         fmt="d",
         square=True,
@@ -119,7 +121,6 @@ def plot_som_activation_heatmap(heatmap, som_dim, cmap="YlGnBu"):
     plt.gca().invert_yaxis()
     plt.tight_layout()
     plt.show()
-
 
 def compute_som_avg_risk(model, loader, device, som_dim):
     """
@@ -168,6 +169,7 @@ def plot_som_avg_risk(heatmap, som_dim, cmap="YlGnBu"):
     plt.figure(figsize=(W*0.6, H*0.6))
     sns.heatmap(
         heatmap,
+        vmin=0.0, vmax=1.0,
         cmap=cmap,
         # linewidths=.5, linecolor="gray"
     )
@@ -457,4 +459,25 @@ def plot_trajectory_snapshots_custom_color(heatmap, trajectories, som_dim, snaps
         cbar.set_label('Timepoint Risk Score')
 
     plt.tight_layout(rect=[0, 0, 0.8, 1])
+    plt.show()
+    
+    
+    
+    
+    
+def plot_som_avg_mortality_prob(heatmap, som_dim, cmap="YlGnBu"):
+    H, W = som_dim
+    plt.figure(figsize=(W*0.6, H*0.6))
+    sns.heatmap(
+        heatmap,
+        cmap=cmap,
+        vmin=0.0, vmax=1.0,
+        annot=True, fmt=".2f",
+        square=True,
+        cbar_kws={"label": "Avg Mortality Prob"},
+    )
+    plt.title("SOM Node Avg Mortality Probability")
+    plt.xlabel("SOM Width"); plt.ylabel("SOM Height")
+    plt.gca().invert_yaxis()
+    plt.tight_layout()
     plt.show()

@@ -102,9 +102,9 @@ def train_patient_outcome_model(model,
             for _,flat_data,ts_data, graph_data,_, ts_lengths, _,_,_ in tqdm(train_loader_for_p, desc=f"[Joint E{ep+1}] Calc Global P", leave=False):
                 flat_data, ts_data, ts_lengths = flat_data.to(device), ts_data.to(device), ts_lengths.to(device)
                 graph_data = graph_data.to(device)
-                
-                outputs = model(flat_data, graph_data, ts_data,ts_lengths)
-                
+
+                outputs = model(ts_data, ts_lengths)
+
                 _, mask_p_flat_bool = model.generate_mask(ts_data.size(1), ts_lengths)
                 
                 q_for_p_batch_valid = outputs["aux_info"]["q"][mask_p_flat_bool]
@@ -146,9 +146,9 @@ def train_patient_outcome_model(model,
 
                 
             optimizer.zero_grad()
-            
-            output = model(flat_data, graph_data, ts_data,ts_lengths)
-            
+
+            output = model(ts_data, ts_lengths)
+
             _, mask_p_flat = model.generate_mask(ts_data.size(1), ts_lengths)
             
             q_soft_flat_valid    = output["aux_info"]["q"][mask_p_flat]
@@ -209,12 +209,12 @@ def train_patient_outcome_model(model,
                 categories = categories.to(device)
                 
                 y_risk_true, y_mortality_true =risk.to(device),mortality.to(device)
-                
-                
-                output_val = model(flat_data, graph_data, ts_data, ts_lengths)
-                
-                # === som loss 
-                
+
+
+                output_val = model(ts_data, ts_lengths)
+
+                # === som loss
+
                 mask_seq_bool, _ = model.generate_mask(ts_data.size(1), ts_lengths)
                 mask_seq = mask_seq_bool.float()
 
@@ -292,7 +292,7 @@ def test_patient_outcome_model(model, test_loader, device):
             graph_data = graph_data.to(device)
 
             # forward
-            output = model(flat_data, graph_data, ts_data, ts_lengths)
+            output = model(ts_data, ts_lengths)
             mask_seq, _ = model.generate_mask(ts_data.size(1), ts_lengths)
             mask_float = mask_seq.float()  # [B, T]
 

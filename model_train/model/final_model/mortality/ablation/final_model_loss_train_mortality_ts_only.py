@@ -66,7 +66,7 @@ class EarlyStopping:
 
 def train_patient_outcome_model(model, 
             train_loader, val_loader, train_loader_for_p, device, optimizer,  epochs: int, save_dir: str, 
-            gamma=100, beta=10,kappa=1, theta=1,
+            gamma=100, beta=10,kappa=1, eta=1,
             patience: int = 20 ):
 
     for param in model.parameters():
@@ -80,7 +80,7 @@ def train_patient_outcome_model(model,
     history = {
         'train_loss': [], 'val_loss': [], 'cat':[],
         'train_risk': [],  'train_mortality': [],
-        'train_cah': [], 'train_s_som': [], 'train_smooth': []
+        'train_cah': [], 'train_s_som': [], 'train_smooth': [],
     }
 
     scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=patience // 2 if patience > 0 else 5)
@@ -99,11 +99,9 @@ def train_patient_outcome_model(model,
         model.eval()
         all_q_list_for_p_epoch = [] # 每个有效时间步对som节点的q值。 soft assignment
         with torch.no_grad():
-            for _,flat_data,ts_data, graph_data,_, ts_lengths, _,_,_ in tqdm(train_loader_for_p, desc=f"[Joint E{ep+1}] Calc Global P", leave=False):
-                flat_data, ts_data, ts_lengths = flat_data.to(device), ts_data.to(device), ts_lengths.to(device)
-                graph_data = graph_data.to(device)
-                
-                outputs = model(flat_data, graph_data, ts_data,ts_lengths)
+            for _,_,ts_data, _,_, ts_lengths, _,_,_ in tqdm(train_loader_for_p, desc=f"[Joint E{ep+1}] Calc Global P", leave=False):
+                ts_data, ts_lengths = ts_data.to(device), ts_lengths.to(device)
+                outputs = model( ts_data,ts_lengths)
                 
                 _, mask_p_flat_bool = model.generate_mask(ts_data.size(1), ts_lengths)
                 
@@ -120,9 +118,9 @@ def train_patient_outcome_model(model,
         model.train()
         current_epoch_losses = {key: 0.0 for key in history if 'train_' in key}
         
-        for _,flat_data,ts_data, graph_data ,risk, ts_lengths,_, mortality, original_indices in train_loader:
+        for _,_,ts_data, _ ,risk, ts_lengths,_, mortality, original_indices in train_loader:
             
-            flat_data, ts_data, ts_lengths = flat_data.to(device), ts_data.to(device), ts_lengths.to(device)
+            ts_data, ts_lengths = ts_data.to(device), ts_lengths.to(device)
             graph_data = graph_data.to(device)
             y_risk_true, y_mortality_true =risk.to(device),mortality.to(device)        
             original_indices = original_indices.to(device)
@@ -147,7 +145,7 @@ def train_patient_outcome_model(model,
                 
             optimizer.zero_grad()
             
-            output = model(flat_data, graph_data, ts_data,ts_lengths)
+            output = model( ts_data,ts_lengths)
             
             _, mask_p_flat = model.generate_mask(ts_data.size(1), ts_lengths)
             
@@ -171,17 +169,25 @@ def train_patient_outcome_model(model,
             loss_smooth = model.compute_loss_smoothness(
               z_e_sample_seq, bmu_indices_flat, model.alpha_som_q, mask_seq)
             
-            ## ===1. prediction loss MSE loss
-            risk_scores_pred = output["risk_scores"] # (B, T)
-            mask_seq_risk_bool, _ = model.generate_mask(ts_data.size(1), ts_lengths)
-            mask_seq_risk = mask_seq_risk_bool.float()
-            ## mse ##
-            loss_risk_elementwise =  F.mse_loss(risk_scores_pred, y_risk_true, reduction='none') # (B, T)
-            loss_risk = (loss_risk_elementwise * mask_seq_risk).sum() / mask_seq_risk.sum().clamp(min=1) 
             
+            ## ===2. mortality prediction loss  BCE loss
+            mortality_prob_pred = output["mortality_prob"] # (B, T)
 
+            # B = mortality_prob_pred.size(0)
+            # mortality_prob_pred_last = mortality_prob_pred[torch.arange(B), ts_lengths-1]
+            # loss_mortality_vec = F.binary_cross_entropy(  mortality_prob_pred_last,  y_mortality_true.float(), reduction='none')  # (B)  
+            # loss_mortality =  loss_mortality_vec.mean()
 
-            total_loss =  gamma * loss_cah + beta * loss_s_som + kappa * loss_smooth + theta * loss_risk
+            # bce ##
+            mask_seq_mortality_bool, _ = model.generate_mask(ts_data.size(1), ts_lengths)
+            mask_seq_mortality = mask_seq_mortality_bool.float()
+            y_mortality_true = y_mortality_true.float().unsqueeze(1).expand_as(mortality_prob_pred)          # [B, T]
+            
+            loss_mortality_elementwise = F.binary_cross_entropy( mortality_prob_pred,  y_mortality_true, reduction='none')  # (B)
+
+            loss_mortality = (loss_mortality_elementwise * mask_seq_mortality).sum() / mask_seq_mortality.sum().clamp(min=1)
+
+            total_loss =  gamma * loss_cah + beta * loss_s_som + kappa * loss_smooth + eta * loss_mortality 
             
             
             total_loss.backward()
@@ -192,7 +198,8 @@ def train_patient_outcome_model(model,
             current_epoch_losses['train_cah'] += loss_cah.item()
             current_epoch_losses['train_s_som'] += loss_s_som.item()
             current_epoch_losses['train_smooth'] += loss_smooth.item()
-            current_epoch_losses['train_risk'] += loss_risk.item()
+            current_epoch_losses['train_mortality'] += loss_mortality.item()
+          
 
         for key in current_epoch_losses:
             history[key].append(current_epoch_losses[key] / len(train_loader))
@@ -202,16 +209,15 @@ def train_patient_outcome_model(model,
         per_patient_losses = []
         per_patient_cats = []
         with torch.no_grad():
-            for _,flat_data,ts_data, graph_data ,risk, ts_lengths,categories, mortality, original_indices in val_loader:
+            for _,_,ts_data, _ ,risk, ts_lengths,categories, mortality, original_indices in val_loader:
                 
-                flat_data, ts_data, ts_lengths = flat_data.to(device), ts_data.to(device), ts_lengths.to(device)
-                graph_data = graph_data.to(device)
+                ts_data, ts_lengths = ts_data.to(device), ts_lengths.to(device)
                 categories = categories.to(device)
                 
                 y_risk_true, y_mortality_true =risk.to(device),mortality.to(device)
                 
                 
-                output_val = model(flat_data, graph_data, ts_data, ts_lengths)
+                output_val = model( ts_data, ts_lengths)
                 
                 # === som loss 
                 
@@ -219,17 +225,27 @@ def train_patient_outcome_model(model,
                 mask_seq = mask_seq_bool.float()
 
 
-                # === 1. prediction loss
-                risk_scores_pred = output_val["risk_scores"] # (B, T)
-                
-                loss_risk_elementwise_val = F.mse_loss(risk_scores_pred, y_risk_true, reduction='none')
-                
-                loss_risk_val = (loss_risk_elementwise_val * mask_seq).sum() / mask_seq.sum().clamp(min=1)
-                # per risk
-                per_risk = (loss_risk_elementwise_val * mask_seq).sum(dim=1) / mask_seq.sum(dim=1).clamp(min=1)
-                
-                total_epoch_loss_val += (loss_risk_val).item()
 
+                ## ===2. mortality prediction loss
+                mortality_prob_pred_val = output_val["mortality_prob"] # (B, T)
+
+                # B = mortality_prob_pred_val.size(0)
+                # mortality_prob_pred_last_val = mortality_prob_pred_val[torch.arange(B), ts_lengths-1]
+                # loss_mortality_vec = F.binary_cross_entropy(  mortality_prob_pred_last_val,  y_mortality_true.float(), reduction='none')  # (B)  
+                # loss_mortality_val =  loss_mortality_vec.mean()
+                # bce ##
+                mask_seq_mortality_bool, _ = model.generate_mask(ts_data.size(1), ts_lengths)
+                mask_seq_mortality = mask_seq_mortality_bool.float()
+                y_mortality_full_val = y_mortality_true.float().unsqueeze(1).expand_as(mortality_prob_pred_val)   # [B, T]
+                loss_mortality_elementwise_val = F.binary_cross_entropy( mortality_prob_pred_val,  y_mortality_full_val, reduction='none')
+                loss_mortality_val = (loss_mortality_elementwise_val * mask_seq_mortality).sum() / mask_seq_mortality.sum().clamp(min=1)
+               
+                total_epoch_loss_val += (loss_mortality_val).item()
+
+                # # per mortality
+                # per_mort = (loss_mortality_elementwise * mask_seq).sum(dim=1) / mask_seq.sum(dim=1).clamp(min=1)
+                # per_patient_losses += (per_risk + per_mort).cpu().tolist()
+                # per_patient_cats   += categories.cpu().tolist()
 
 
         avg_val_loss = total_epoch_loss_val / len(val_loader)
@@ -275,178 +291,108 @@ def train_patient_outcome_model(model,
 
 #===== evaluation function ====
 
+from sklearn.metrics import precision_recall_curve
 
-from sklearn.metrics import mean_squared_error
 
 def test_patient_outcome_model(model, test_loader, device):
     model.eval()
-    all_risk_preds, all_risk_trues = [], []
+    
+    all_mort_preds, all_mort_trues = [], []
 
-    # record per‐patient mean predictions and true categories, for κ
-    per_patient_mean_risk = []
+    # 记录 per-patient loss
+    per_patient_mort_losses = []
     per_patient_cats = []
 
     with torch.no_grad():
-        for _, flat_data, ts_data, graph_data, risk, ts_lengths, categories, _, _ in test_loader:
-            flat_data, ts_data, ts_lengths = flat_data.to(device), ts_data.to(device), ts_lengths.to(device)
-            graph_data = graph_data.to(device)
+        for _, _, ts_data, _, risk, ts_lengths, categories, mortality, _ in test_loader:
+            ts_data, ts_lengths =  ts_data.to(device), ts_lengths.to(device)
+            categories = categories.to(device)
+            y_risk_true, y_mortality_true = risk.to(device), mortality.to(device)
 
-            # forward
-            output = model(flat_data, graph_data, ts_data, ts_lengths)
-            mask_seq, _ = model.generate_mask(ts_data.size(1), ts_lengths)
-            mask_float = mask_seq.float()  # [B, T]
-
-            # --- collect raw preds and truths for RMSE/R² ---
-            risk_pred = output["risk_scores"]        # [B, T]
-            risk_true = risk.to(device)             # [B, T]
-
-            # flatten valid entries
-            mask_flat = mask_float.view(-1).bool()
-            preds_flat = risk_pred.view(-1)[mask_flat].cpu().numpy()
-            trues_flat = risk_true.view(-1)[mask_flat].cpu().numpy()
-
-            all_risk_preds.extend(preds_flat)
-            all_risk_trues.extend(trues_flat)
-
-            # --- per‐patient mean risk & category for κ ---
-            sum_pred = (risk_pred * mask_float).sum(dim=1)          # [B]
-            count = mask_float.sum(dim=1).clamp(min=1)              # [B]
-            mean_pred = (sum_pred / count).cpu().numpy()           # [B]
-            per_patient_mean_risk.extend(mean_pred.tolist())
-
-            per_patient_cats.extend(categories.cpu().tolist())
-
-    # --- regression metrics ---
-    mse = mean_squared_error(all_risk_trues, all_risk_preds)
-    rmse = mse**0.5
-
-    print(f"Test Risk    → RMSE: {rmse:.4f}")
+            output = model( ts_data, ts_lengths)
+            mask_seq_bool, _ = model.generate_mask(ts_data.size(1), ts_lengths)
+            mask_seq = mask_seq_bool.float()
 
 
-    # per‐category loss summary (optional)
+            
+            # 2. Mortality classification
+            # mortality_prob_pred = output["mortality_prob"]  # (B, T)
+            # mort_preds_flat = mortality_prob_pred.view(-1)[mask_flat].cpu().numpy()
+            # mort_trues_flat = y_mortality_true.view(-1)[mask_flat].cpu().numpy()
+            # all_mort_preds.extend(mort_preds_flat)
+            # all_mort_trues.extend(mort_trues_flat)
+            
+            B = ts_data.size(0)
+            idx = torch.arange(B, device=device)
+            last_idx = (ts_lengths - 1).clamp(min=0)  # [B]
+            mortality_prob_pred_last = output["mortality_prob"][idx, last_idx]  # [B]
+            
+            loss_mortality_elementwise = F.binary_cross_entropy(mortality_prob_pred_last, y_mortality_true.float(), reduction='none')  
+                      
+            per_patient_mort_losses += loss_mortality_elementwise.cpu().tolist()
+            
+            mortality_prob_pred_last = mortality_prob_pred_last.cpu().numpy()  # [B]
+            mortality_true_last = y_mortality_true.cpu().numpy()                              # [B]
+            all_mort_preds.extend(mortality_prob_pred_last)
+            all_mort_trues.extend(mortality_true_last)
+
+
+            # 3. per-patient categories    
+            per_patient_cats += categories.cpu().tolist()
+
+    # --- 计算分类指标 ---
+    # 
+    try:
+        auroc = roc_auc_score(all_mort_trues, all_mort_preds)
+    except:
+        auroc = float('nan')
+    try:
+        auprc = average_precision_score(all_mort_trues, all_mort_preds)
+    except:
+        auprc = float('nan')
+        
+    # 以0.5为阈值
+    
+    precisions, recalls, thresholds = precision_recall_curve(all_mort_trues, all_mort_preds)
+    f1s = 2 * (precisions * recalls) / (precisions + recalls + 1e-8)
+    best_idx = np.argmax(f1s)
+    best_thresh = thresholds[best_idx]
+    print("Best threshold:", best_thresh, "→ F1:", f1s[best_idx]) 
+       
+    mort_preds_binary = [1 if p >= best_thresh else 0 for p in all_mort_preds]
+    precision = precision_score(all_mort_trues, mort_preds_binary, zero_division=0)
+    recall    = recall_score(all_mort_trues, mort_preds_binary, zero_division=0)
+    f1        = f1_score(all_mort_trues, mort_preds_binary, zero_division=0)
+    
+    # Specificity = TN / (TN + FP)
+    tn = sum(1 for t, p in zip(all_mort_trues, mort_preds_binary) if t == 0 and p == 0)
+    fp = sum(1 for t, p in zip(all_mort_trues, mort_preds_binary) if t == 0 and p == 1)
+    specificity = tn / (tn + fp) if (tn + fp) > 0 else float('nan')
+    # 输出结果
+    print("Total test samples:", len(all_mort_trues))
+    print("Number of actual deaths:", sum(all_mort_trues))
+    print("Predictions range: min=", min(all_mort_preds), " max=", max(all_mort_preds))
+    print("Mean predicted death probability:", np.mean(all_mort_preds))      
+    
+    print(f"Test Mortality - AUROC: {auroc:.4f}, AUPRC: {auprc:.4f}, Precision: {precision:.4f}, Recall: {recall:.4f},pecificity: {specificity:.4f}, F1: {f1:.4f}")
+
+    # 按类别统计loss
     hist_cat = {}
-    losses_t = torch.tensor([
-        (p - t)**2 for p, t in zip(per_patient_mean_risk, per_patient_mean_risk)  # here just placeholder
-    ])  # replace with your per‐patient loss if needed
-    cats_t   = torch.tensor(per_patient_cats)
-    for i in range(4):
+    losses_t = torch.tensor(per_patient_mort_losses)
+    cats_t = torch.tensor(per_patient_cats)
+    for i in range(2):
         sel = cats_t == i
         if sel.any():
             group = losses_t[sel]
             hist_cat[i] = (group.mean().item(), int(sel.sum().item()))
 
+    # 返回主要指标
     return {
-        "rmse": rmse,
+        "auroc": auroc,
+        "auprc": auprc,
+        "precision": precision,
+        "recall": recall,
+        "specificity": specificity,
+        "f1": f1,
         "per_patient_cat_loss": hist_cat,
     }
-
-
-
-
-
-
-
-
-def plot_trajectory_snapshots_custom_color(heatmap, trajectories, som_dim, snapshot_times,
-                                           heatmap_cmap="YlGnBu", risk_point_cmap="coolwarm"):
-    """
-    Generates a series of plots showing multiple trajectories unfolding over time.
-    Each trajectory has a main color based on its category, and its points are
-    colored by risk at each timestep.
-
-    Args:
-        heatmap (np.ndarray): The background risk heatmap.
-        trajectories (dict): Dictionary of trajectory data for one or more patients.
-        som_dim (list): The dimensions of the SOM grid [H, W].
-        snapshot_times (list): A list of timesteps at which to generate a plot snapshot.
-        heatmap_cmap (str): Colormap for the background heatmap.
-        risk_point_cmap (str): Colormap for the scatter points on the trajectory.
-    """
-    H, W = som_dim
-    
-    # --- 1. 创建子图画布 ---
-    # 画布的列数等于快照的数量
-    num_snapshots = len(snapshot_times)
-    fig, axes = plt.subplots(1, num_snapshots, figsize=(W * num_snapshots * 0.4, H * 0.4))
-    if num_snapshots == 1:
-        axes = [axes] # 保证axes总是一个可迭代对象
-
-    fig.suptitle("Patient Trajectory Visualization", fontsize=12, y=1.02)
-
-    # --- 2. 准备颜色映射器 ---
-    # a. 类别到主颜色的映射
-    category_colors = { 0: 'green', 3: 'red', 1: 'orange', 2: 'purple' }
-    default_color = 'gray'
-    
-    # b. 风险值到散点颜色的映射 (基于所有轨迹的全局风险范围)
-    all_risks = np.concatenate([d["risk_sequence"] for d in trajectories.values() if len(d["risk_sequence"]) > 0])
-    norm = Normalize(vmin=all_risks.min(), vmax=all_risks.max()) if len(all_risks) > 0 else None
-    cmap_points = plt.get_cmap(risk_point_cmap)
-
-    # --- 3. 遍历每个时间快照，绘制一个子图 ---
-    for i, t in enumerate(snapshot_times):
-        ax = axes[i]
-        
-        # a. 绘制背景热力图
-        sns.heatmap(heatmap, cmap=heatmap_cmap, annot=False, cbar=True, cbar_kws={"label": "Avg Risk Score of SOM node"}, ax=ax, square=True)
-        ax.invert_yaxis()
-        ax.set_title(f"t = {t}", fontsize=10)
-        ax.set_xticks([])
-        ax.set_yticks([])
-
-        # b. 在当前子图上绘制所有轨迹直到时间点t的部分
-        for sample_id, traj_data in trajectories.items():
-            coords = traj_data["coords"]
-            risks = traj_data["risk_sequence"]
-            category = traj_data["category"]
-            
-            # 使用切片来获取从开始到当前快照时间点的所有数据
-            current_t = min(t + 1, len(coords))
-            if current_t == 0: continue # 如果一个点都没有，就不用画
-            
-            coords_slice = coords[:current_t]
-            risks_slice = risks[:current_t]
-            
-            # 获取轨迹主颜色
-            line_color = category_colors.get(category, default_color)
-
-            # 准备坐标
-            x_coords = np.array([c[0] + 0.5 for c in coords_slice])
-            y_coords = np.array([c[1] + 0.5 for c in coords_slice])
-            
-            # 绘制轨迹线
-            ax.plot(x_coords, y_coords, color=line_color, linestyle='-', linewidth=2, alpha=0.8, zorder=2)
-            
-            # 绘制风险着色的散点
-            if norm:
-                ax.scatter(x_coords, y_coords, c=risks_slice, cmap=cmap_points, norm=norm, 
-                           s=50, zorder=3, ec='black', lw=0.5)
-
-            # 只在第一个点上标记起点 'S'
-            ax.plot(x_coords[0], y_coords[0], 'o', color='white', markersize=10, 
-                    markeredgecolor=line_color, markeredgewidth=2, zorder=4)
-            ax.text(x_coords[0], y_coords[0], 'S', color='black', ha='center', va='center', 
-                    fontweight='bold', fontsize=7, zorder=5)
-            
-            # 在最后一个点上标记终点 'E'
-            ax.plot(x_coords[-1], y_coords[-1], 'X', color=line_color, markersize=10, markeredgecolor='black', markeredgewidth=1, zorder=5)
-            ax.text(x_coords[-1], y_coords[-1], 'E', color='black', ha='center', va='center',fontweight='bold', fontsize=7, zorder=6)
-
-    # --- 4. 添加图例和共享的颜色条 ---
-    # 创建一个代理图例
-    legend_elements = [plt.Line2D([0], [0], color=color, lw=4, label=f'Category {cat}')
-                       for cat, color in category_colors.items() if cat in [d['category'] for d in trajectories.values()]]
-    start_proxy = plt.Line2D([0], [0],  marker='o', color='white', markeredgecolor='black', linestyle='None',  markersize=8, label='Start (S)')
-    end_proxy   = plt.Line2D([0], [0],  marker='X', color='white',markeredgecolor='black', linestyle='None', markersize=8, label='End (E)')
-    fig.legend(handles=legend_elements + [start_proxy, end_proxy], title="Patient Category", bbox_to_anchor=(0.98, 0.85), loc='center left')
-
-    # 为风险散点创建一个共享的颜色条
-    if norm:
-        cbar_ax = fig.add_axes([0.85, 0.05, 0.04, 0.82]) # [left, bottom, width, height]
-        sm = plt.cm.ScalarMappable(cmap=cmap_points, norm=norm)
-        sm.set_array([])
-        cbar = fig.colorbar(sm, cax=cbar_ax)
-        cbar.set_label('Timepoint Risk Score')
-
-    plt.tight_layout(rect=[0, 0, 0.8, 1])
-    plt.show()

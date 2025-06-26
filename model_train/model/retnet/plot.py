@@ -177,15 +177,35 @@ def compute_som_activation_heatmap(model, data_loader, device):
     activation_grid = activation_counts.view(*som_dim)  # (H, W)
     return activation_grid.numpy()
 
-def plot_som_activation_heatmap(activation_grid):
-    plt.figure(figsize=(6, 5))
-    sns.heatmap(activation_grid, cmap="viridis", annot=True, fmt="d")
-    plt.title("SOM Node Activation Frequency")
+# def plot_som_activation_heatmap(activation_grid):
+#     plt.figure(figsize=(6, 5))
+#     sns.heatmap(activation_grid, cmap="viridis", annot=True, fmt="d")
+#     plt.title("SOM Node Activation Frequency")
+#     plt.xlabel("SOM Width")
+#     plt.ylabel("SOM Height")
+#     plt.tight_layout()
+#     plt.show()
+
+from matplotlib.colors import LogNorm
+def plot_som_activation_heatmap(heatmap, som_dim=(10,10), cmap="YlGnBu"):
+    H, W = som_dim
+    plt.figure(figsize=(W*0.6, H*0.6))
+    sns.heatmap(
+        heatmap,
+        cmap=cmap,
+        norm=LogNorm(vmin=max(heatmap.min(), 1e-3), vmax=heatmap.max()),
+        annot=False,
+        fmt="d",
+        square=True,
+        cbar_kws={"label": "Activation Count"}
+    )
+    plt.title("Overall SOM Activation")
     plt.xlabel("SOM Width")
     plt.ylabel("SOM Height")
+    plt.gca().invert_yaxis()
     plt.tight_layout()
     plt.show()
-    
+
     
 def visualize_recons(model, data_loader, num_patients, feature_indices, feature_names, device):
     """
@@ -368,3 +388,6 @@ def plot_som_avg_category(heatmap, som_dim, cmap="YlGnBu"):
     plt.gca().invert_yaxis()
     plt.tight_layout()
     plt.show()
+    
+    
+    

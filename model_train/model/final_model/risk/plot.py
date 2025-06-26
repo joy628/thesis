@@ -379,7 +379,7 @@ def plot_trajectory_snapshots_custom_color(heatmap, trajectories, som_dim, snaps
     if num_snapshots == 1:
         axes = [axes] # 保证axes总是一个可迭代对象
         
-    fig.suptitle("Patient Trajectory Evolution at Different Timesteps", fontsize=16, y=1.02)
+    fig.suptitle("Patient Trajectory Visualization", fontsize=12, y=1.02)
 
     # --- 2. 准备颜色映射器 ---
     # a. 类别到主颜色的映射
@@ -396,7 +396,7 @@ def plot_trajectory_snapshots_custom_color(heatmap, trajectories, som_dim, snaps
         ax = axes[i]
         
         # a. 绘制背景热力图
-        sns.heatmap(heatmap, cmap=heatmap_cmap, annot=False, cbar=True, cbar_kws={"label": "Avg Risk Score of SOM node"}, ax=ax, square=True)
+        sns.heatmap(heatmap, cmap=heatmap_cmap, vmin=0,vmax=1,annot=False, cbar=True, cbar_kws={"label": "Avg Risk Score of SOM node"}, ax=ax, square=True)
         ax.invert_yaxis()
         ax.set_title(f"t = {t}", fontsize=10)
         ax.set_xticks([])
@@ -425,10 +425,10 @@ def plot_trajectory_snapshots_custom_color(heatmap, trajectories, som_dim, snaps
             # 绘制轨迹线
             ax.plot(x_coords, y_coords, color=line_color, linestyle='-', linewidth=2, alpha=0.8, zorder=2)
             
-            # 绘制风险着色的散点
-            if norm:
-                ax.scatter(x_coords, y_coords, c=risks_slice, cmap=cmap_points, norm=norm, 
-                           s=50, zorder=3, ec='black', lw=0.5)
+            # # 绘制风险着色的散点
+            # if norm:
+            #     ax.scatter(x_coords, y_coords, c=risks_slice, cmap=cmap_points, norm=norm, 
+            #                s=50, zorder=3, ec='black', lw=0.5)
 
             # 只在第一个点上标记起点 'S'
             ax.plot(x_coords[0], y_coords[0], 'o', color='white', markersize=10, 
@@ -449,12 +449,89 @@ def plot_trajectory_snapshots_custom_color(heatmap, trajectories, som_dim, snaps
     fig.legend(handles=legend_elements + [start_proxy, end_proxy], title="Patient Category", bbox_to_anchor=(0.98, 0.85), loc='center left')
 
     # 为风险散点创建一个共享的颜色条
-    if norm:
-        cbar_ax = fig.add_axes([0.85, 0.05, 0.04, 0.82]) # [left, bottom, width, height]
-        sm = plt.cm.ScalarMappable(cmap=cmap_points, norm=norm)
-        sm.set_array([])
-        cbar = fig.colorbar(sm, cax=cbar_ax)
-        cbar.set_label('Timepoint Risk Score')
+    # if norm:
+    #     cbar_ax = fig.add_axes([0.85, 0.05, 0.04, 0.82]) # [left, bottom, width, height]
+    #     sm = plt.cm.ScalarMappable(cmap=cmap_points, norm=norm)
+    #     sm.set_array([])
+    #     cbar = fig.colorbar(sm, cax=cbar_ax)
+    #     cbar.set_label('Timepoint Risk Score')
 
     plt.tight_layout(rect=[0, 0, 0.8, 1])
     plt.show()
+
+
+def print_statistics_of_dataloader(test_loader):
+
+    cat0_info = []
+    for batch in test_loader:
+        pid, flat, ts, graph, risk, lengths, categories, mort, orig_idx = batch
+        # lengths: Tensor([B]) 每个样本的时序长度
+        for i in torch.nonzero(categories == 0, as_tuple=True)[0].tolist():
+            cat0_info.append((orig_idx[i].item(), pid[i], lengths[i].item()))
+
+    # 按第三个字段（length）降序排列
+    cat0_info_sorted = sorted(cat0_info, key=lambda x: x[2], reverse=True)
+
+    cat0_indices_sorted = [t[0] for t in cat0_info_sorted]
+    cat0_ids_sorted     = [t[1] for t in cat0_info_sorted]
+    cat0_lengths_sorted = [t[2] for t in cat0_info_sorted]
+
+    print("test_loader 中 cat=0 的样本索引：", cat0_indices_sorted)
+    print("cat=0 的患者 ID:", cat0_ids_sorted)
+    print("cat=0 的样本长度:", cat0_lengths_sorted)
+
+
+    cat1_info = []
+    for batch in test_loader:
+        pid, flat, ts, graph, risk, lengths, categories, mort, orig_idx = batch
+        # lengths: Tensor([B]) 每个样本的时序长度
+        for i in torch.nonzero(categories == 1, as_tuple=True)[0].tolist():
+            cat1_info.append((orig_idx[i].item(), pid[i], lengths[i].item()))
+
+    # 按第三个字段（length）降序排列
+    cat1_info_sorted = sorted(cat1_info, key=lambda x: x[2], reverse=True)
+
+    cat1_indices_sorted = [t[0] for t in cat1_info_sorted]
+    cat1_ids_sorted     = [t[1] for t in cat1_info_sorted]
+    cat1_lengths_sorted = [t[2] for t in cat1_info_sorted]
+
+    print("test_loader 中 cat=1 的样本索引：", cat1_indices_sorted)
+    print("cat=1 的患者 ID:", cat1_ids_sorted)
+    print("cat=1 的样本长度:", cat1_lengths_sorted)
+
+
+    cat2_info = []
+    for batch in test_loader:
+        pid, flat, ts, graph, risk, lengths, categories, mort, orig_idx = batch
+        # lengths: Tensor([B]) 每个样本的时序长度
+        for i in torch.nonzero(categories == 2, as_tuple=True)[0].tolist():
+            cat2_info.append((orig_idx[i].item(), pid[i], lengths[i].item()))
+
+    # 按第三个字段（length）降序排列
+    cat2_info_sorted = sorted(cat2_info, key=lambda x: x[2], reverse=True)
+
+    cat2_indices_sorted = [t[0] for t in cat2_info_sorted]
+    cat2_ids_sorted     = [t[1] for t in cat2_info_sorted]
+    cat2_lengths_sorted = [t[2] for t in cat2_info_sorted]
+
+    print("test_loader 中 cat=2 的样本索引：", cat2_indices_sorted)
+    print("cat=2 的患者 ID:", cat2_ids_sorted)
+    print("cat=2 的样本长度:", cat2_lengths_sorted)
+
+    cat3_info = []
+    for batch in test_loader:
+        pid, flat, ts, graph, risk, lengths, categories, mort, orig_idx = batch
+        # lengths: Tensor([B]) 每个样本的时序长度
+        for i in torch.nonzero(categories == 3, as_tuple=True)[0].tolist():
+            cat3_info.append((orig_idx[i].item(), pid[i], lengths[i].item()))
+
+    # 按第三个字段（length）降序排列
+    cat3_info_sorted = sorted(cat3_info, key=lambda x: x[2], reverse=True)
+
+    cat3_indices_sorted = [t[0] for t in cat3_info_sorted]
+    cat3_ids_sorted     = [t[1] for t in cat3_info_sorted]
+    cat3_lengths_sorted = [t[2] for t in cat3_info_sorted]
+
+    print("test_loader 中 cat=3 的样本索引：", cat3_indices_sorted)
+    print("cat=3 的患者 ID:", cat3_ids_sorted)
+    print("cat=3 的样本长度:", cat3_lengths_sorted)
